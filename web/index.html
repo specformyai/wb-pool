@@ -80,6 +80,15 @@
         <button class="btn ghost" id="btnPoolCheckin"><i data-lucide="calendar-check"></i>全部签到</button>
       </div>
     </div>
+    <div class="mode-row">
+      <span>外部调用</span>
+      <div class="seg" id="rotationMode">
+        <button data-mode="lru">轮询</button>
+        <button data-mode="drain">优先耗尽</button>
+      </div>
+      <span class="hint" id="rotationHint" style="margin:0"></span>
+      <button class="btn ghost" id="btnRotationSave"><i data-lucide="save"></i>应用</button>
+    </div>
     <div class="table-wrap">
       <table id="poolTable">
         <thead><tr>
@@ -252,6 +261,7 @@
       <h2><i data-lucide="message-square"></i>对话调试</h2>
       <div class="head-actions">
         <select id="chatModel" class="mono"></select>
+        <select id="chatAccount" class="mono"></select>
         <label class="inline-check"><input type="checkbox" id="chatStream" checked><span>流式</span></label>
         <button class="btn ghost" id="btnChatClear"><i data-lucide="eraser"></i>清空</button>
       </div>

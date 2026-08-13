@@ -146,7 +146,12 @@ def _sse(obj: Any) -> str:
     return f"data: {json.dumps(obj, ensure_ascii=False)}\n\n"
 
 
-def _pick_account() -> Account:
+def _pick_account(force_key: str | None = None) -> Account:
+    if force_key:
+        acc, err = pool.acquire_specific(force_key, proxy=pm.pick())
+        if not acc:
+            raise HTTPException(400, f"指定账号不可用: {err}")
+        return acc
     acc = pool.acquire(proxy=pm.pick())
     if not acc:
         raise HTTPException(503, "账号池中没有可用账号，请先在 WebUI 添加账号")
@@ -161,10 +166,14 @@ async def chat_completions(request: Request) -> Any:
     payload = {k: v for k, v in body.items() if k not in ("stream", "stream_options")}
     payload["model"] = model
 
+    # X-WB-Force-Account: 手机号或 masked，调试时指定账号
+    force_key = (request.headers.get("X-WB-Force-Account") or "").strip() or None
+
     last_err: str | None = None
     tried: list[str] = []
-    for _ in range(min(3, max(1, len(pool.all())))):
-        acc = _pick_account()
+    max_tries = 1 if force_key else min(3, max(1, len(pool.all())))
+    for _ in range(max_tries):
+        acc = _pick_account(force_key)
         if acc.masked() in tried:
             continue
         tried.append(acc.masked())
@@ -174,6 +183,11 @@ async def chat_completions(request: Request) -> Any:
             first = next(gen)          # 触发首包，才能捕获上游错误
         except upstream.UpstreamError as exc:
             last_err = f"{exc.code}: {exc.msg}"
+            if force_key:
+                # 指定账号调试：直接透传上游错误，不改账号状态
+                raise HTTPException(502, {"error": {"message": last_err,
+                                                    "code": exc.code,
+                                                    "type": "upstream_error"}})
             pool.release(acc, error=last_err)
             if exc.code == 11102:      # 模型不存在，换号也没用
                 raise HTTPException(400, {"error": {"message": exc.msg, "code": exc.code,
@@ -181,10 +195,14 @@ async def chat_completions(request: Request) -> Any:
             continue
         except StopIteration:
             last_err = "上游返回空流"
+            if force_key:
+                raise HTTPException(502, {"error": {"message": last_err, "type": "upstream_error"}})
             pool.release(acc, error=last_err)
             continue
         except Exception as exc:       # noqa: BLE001
             last_err = str(exc)[:200]
+            if force_key:
+                raise HTTPException(502, {"error": {"message": last_err, "type": "upstream_error"}})
             pool.release(acc, error=last_err)
             continue
 
@@ -303,7 +321,9 @@ async def anthropic_messages(request: Request) -> Any:
         if k in body:
             payload[k] = body[k]
 
-    acc = _pick_account()
+    acc = _pick_account(
+        (request.headers.get("X-WB-Force-Account") or "").strip() or None
+    )
     proxy = pm.pick()
     mid = f"msg_{uuid.uuid4().hex[:24]}"
 
@@ -352,7 +372,8 @@ async def anthropic_messages(request: Request) -> Any:
 
         return StreamingResponse(a_stream(), media_type="text/event-stream",
                                  headers={"Cache-Control": "no-cache",
-                                          "X-Accel-Buffering": "no"})
+                                          "X-Accel-Buffering": "no",
+                                          "X-WB-Account": acc.masked()})
 
     text, usage = "", None
     try:
@@ -404,6 +425,18 @@ def get_pool() -> dict[str, Any]:
 @app.post("/api/pool/refresh_balance", dependencies=[Depends(require_admin)])
 def api_refresh_balance() -> dict[str, Any]:
     return {"ok": True, "results": pool.refresh_balances(proxy=pm.pick())}
+
+
+@app.get("/api/pool/rotation", dependencies=[Depends(require_admin)])
+def api_rotation_get() -> dict[str, Any]:
+    return {"mode": pool.rotation_mode}
+
+
+@app.post("/api/pool/rotation", dependencies=[Depends(require_admin)])
+async def api_rotation_set(request: Request) -> dict[str, Any]:
+    b = await request.json()
+    ok, result = pool.set_rotation_mode(b.get("mode", ""))
+    return {"ok": ok, "mode": result if ok else pool.rotation_mode, "error": "" if ok else result}
 
 
 @app.post("/api/pool/checkin", dependencies=[Depends(require_admin)])
@@ -460,7 +493,7 @@ async def api_import(request: Request) -> dict[str, Any]:
         expires_at=int(dec.get("exp", 0)) * 1000,
         credits_total=bal.get("total", -1.0),
         credits_checked_at=time.time() if bal.get("total", -1) >= 0 else 0.0,
-        registered_at=time.strftime("%Y-%m-%dT%H:%M:%SZ"),
+        registered_at=bal.get("registered_at") or time.strftime("%Y-%m-%dT%H:%M:%SZ"),
         label=b.get("label", "imported"), status="active")
     ok, how = pool.add(acc)
     return {"ok": ok, "action": how, "credits": bal.get("total"),

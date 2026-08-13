@@ -162,11 +162,32 @@ def get_balance(token: str, proxy: str | None = None,
                     "cycle_end": a.get("CycleEndTime"),
                     "unit": a.get("CapacityUnit") or "credits",
                 } for a in accs]
+                # 账号在腾讯侧的真实注册时间。
+                # 上游没有 user/info 之类端点（实测 16 条路径全 404），
+                # JWT 里也只有本次登录的 iat/auth_time。唯一可靠来源是
+                # 「体验版」套餐的 CreateTime —— 注册即发放，一个号只有一份。
+                # 兜底取所有套餐里最早的 CreateTime。
+                created_ms = 0
+                for a in accs:
+                    ct = int(a.get("CreateTime") or 0)
+                    if not ct:
+                        continue
+                    if "体验版" in str(a.get("PackageName") or ""):
+                        created_ms = ct if not created_ms else min(created_ms, ct)
+                if not created_ms:
+                    cts = [int(a.get("CreateTime") or 0) for a in accs]
+                    cts = [c for c in cts if c > 0]
+                    created_ms = min(cts) if cts else 0
                 return {
                     "total": round(sum(p["remain"] for p in pkgs), 4),
                     "packages": pkgs,
                     "raw_total_count": data.get("TotalCount"),
                     "total_dosage": data.get("TotalDosage"),
+                    "registered_ms": created_ms,
+                    "registered_at": (
+                        time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(created_ms / 1000))
+                        if created_ms else ""
+                    ),
                 }
             last = f"empty accounts (code={j.get('code')} msg={j.get('msg')})"
         except Exception as exc:  # noqa: BLE001

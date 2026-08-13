@@ -56,11 +56,12 @@ $$('#tabs .tab').forEach(t => t.onclick = () => {
   t.classList.add('active');
   $('#view-' + t.dataset.view).classList.add('active');
   const v = t.dataset.view;
-  if (v === 'accounts') loadPool();
+  if (v === 'accounts') { loadPool(); loadRotation().catch(() => {}); }
   if (v === 'register') loadInviteCodes().catch(() => {});
   if (v === 'models') loadModels(false);
   if (v === 'proxy') loadProxy();
   if (v === 'overview') loadOverview();
+  if (v === 'chat') loadChatAccounts().catch(() => {});
   if (v === 'api') fillApi();
 });
 
@@ -198,6 +199,28 @@ async function loadPool() {
 $('#btnPoolReload').onclick = e => run(e.currentTarget, loadPool);
 $('#btnPoolBal').onclick = e => run(e.currentTarget, async () => {
   await api('/api/pool/refresh_balance', { method: 'POST' }); toast('余额已刷新', 'ok'); loadPool();
+});
+
+/* ---------- rotation strategy ---------- */
+const ROT_HINT = {
+  lru: '请求轮流分给每个账号，积分均匀下降',
+  drain: '一直用同一个账号直到积分打光，再换下一个'
+};
+function paintRotation(mode) {
+  $$('#rotationMode button').forEach(b => b.classList.toggle('on', b.dataset.mode === mode));
+  $('#rotationHint').textContent = ROT_HINT[mode] || '';
+}
+async function loadRotation() {
+  const d = await api('/api/pool/rotation').catch(() => null);
+  if (d) paintRotation(d.mode);
+}
+$$('#rotationMode button').forEach(b => b.onclick = () => paintRotation(b.dataset.mode));
+$('#btnRotationSave').onclick = e => run(e.currentTarget, async () => {
+  const mode = $('#rotationMode button.on')?.dataset.mode || 'lru';
+  const r = await api('/api/pool/rotation', { method: 'POST', body: JSON.stringify({ mode }) });
+  if (r.ok) toast(`策略已设为${mode === 'drain' ? '优先耗尽' : '轮询'}`, 'ok');
+  else toast(r.error || '设置失败', 'err');
+  paintRotation(r.mode);
 });
 $('#btnPoolCheckin').onclick = e => run(e.currentTarget, async () => {
   const r = await api('/api/pool/checkin', { method: 'POST' });
@@ -448,6 +471,18 @@ function addMsg(role, text = '') {
 }
 $('#btnChatClear').onclick = () => { $('#chatLog').innerHTML = ''; $('#chatMeta').textContent = ''; };
 
+/* 账号下拉：切到对话调试时自动拉取，让用户指定要用哪个号 */
+async function loadChatAccounts() {
+  const d = await api('/api/pool').catch(() => null);
+  const sel = $('#chatAccount');
+  if (!d) return;
+  sel.innerHTML = '<option value="">自动选号</option>' +
+    d.accounts.map(a =>
+      `<option value="${a.phone}">${a.masked}${a.status !== 'active' ? ' [' + (a.status || '?') + ']' : ''} · ${(a.credits_total ?? '?').toString().slice(0,7)} 积分</option>`
+    ).join('');
+}
+
+
 async function send() {
   const inp = $('#chatInput'), text = inp.value.trim();
   if (!text) return;
@@ -461,6 +496,8 @@ async function send() {
 
   const h = { 'Content-Type': 'application/json' };
   if (KEY) h['Authorization'] = `Bearer ${KEY}`;
+  const forceAcc = ($('#chatAccount')?.value || '').trim();
+  if (forceAcc) h['X-WB-Force-Account'] = forceAcc;
   try {
     const r = await fetch('/v1/chat/completions', {
       method: 'POST', headers: h,

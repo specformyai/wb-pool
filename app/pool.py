@@ -71,7 +71,39 @@ class AccountPool:
         self._lock = threading.RLock()
         self._accounts: list[Account] = []
         self._mtime = 0.0
+        # rotation_mode: "lru" = 轮询（负载均衡），"drain" = 优先耗尽当前账号
+        self._state_file = self.path.parent / "pool_state.json"
+        self.rotation_mode: str = "lru"
+        self._load_state()
         self.load()
+
+    # ---------------- 运行策略持久化 ----------------
+    def _load_state(self) -> None:
+        try:
+            if self._state_file.exists():
+                st = json.loads(self._state_file.read_text(encoding="utf-8"))
+                m = str(st.get("rotation_mode") or "lru").lower()
+                if m in ("lru", "drain"):
+                    self.rotation_mode = m
+        except Exception:  # noqa: BLE001
+            pass
+
+    def _save_state(self) -> None:
+        try:
+            self._state_file.write_text(
+                json.dumps({"rotation_mode": self.rotation_mode}, ensure_ascii=False),
+                encoding="utf-8")
+        except OSError:
+            pass
+
+    def set_rotation_mode(self, mode: str) -> tuple[bool, str]:
+        m = (mode or "").lower().strip()
+        if m not in ("lru", "drain"):
+            return False, f"未知策略 {mode}（只支持 lru / drain）"
+        with self._lock:
+            self.rotation_mode = m
+            self._save_state()
+        return True, m
 
     # ---------------- persistence ----------------
     def load(self) -> None:
@@ -160,9 +192,17 @@ class AccountPool:
             return True
 
     # ---------------- rotation ----------------
-    def acquire(self, proxy: str | None = None) -> Account | None:
-        """取最久未使用的可用账号（LRU），必要时先刷新 token。"""
+    def acquire(self, proxy: str | None = None,
+                mode: str | None = None) -> Account | None:
+        """
+        取一个可用账号，必要时先刷新 token。
+
+        mode="lru"   轮询：取最久未使用的账号，请求摊到全池（默认）
+        mode="drain" 耗尽：优先复用最近用过的那个账号，直到它 exhausted
+                     再换下一个。少数账号被打光，其余保持满额。
+        """
         self.reload_if_changed()
+        mode = (mode or self.rotation_mode or "lru").lower()
         with self._lock:
             cands = [a for a in self._accounts if a.usable()]
             if not cands:
@@ -174,7 +214,12 @@ class AccountPool:
                 cands = [a for a in self._accounts if a.usable()]
             if not cands:
                 return None
-            cands.sort(key=lambda a: a.last_used)
+            if mode == "drain":
+                # 最近用过的排最前；同时把余额少的排前面，先把零头打光。
+                # last_used=0（从没用过）排最后，避免每次都拉一个新号进来。
+                cands.sort(key=lambda a: (-a.last_used, a.credits_total))
+            else:
+                cands.sort(key=lambda a: a.last_used)
             acc = cands[0]
             acc.last_used = time.time()
             acc.request_count += 1
@@ -182,6 +227,22 @@ class AccountPool:
         if acc.refresh_token and 0 < acc.expires_in() < REFRESH_AHEAD:
             self.try_refresh(acc, proxy=proxy)
         return acc
+
+    def acquire_specific(self, key: str,
+                         proxy: str | None = None) -> tuple[Account | None, str]:
+        """指定账号取号（对话调试用）。不做可用性筛选，但会说明状态。"""
+        self.reload_if_changed()
+        acc = self.find(key)
+        if not acc:
+            return None, f"账号 {key} 不在池中"
+        if not acc.access_token:
+            return None, f"账号 {acc.masked()} 没有 access_token"
+        with self._lock:
+            acc.last_used = time.time()
+            acc.request_count += 1
+        if acc.refresh_token and 0 < acc.expires_in() < REFRESH_AHEAD:
+            self.try_refresh(acc, proxy=proxy)
+        return acc, ""
 
     def try_refresh(self, acc: Account, proxy: str | None = None) -> bool:
         res = upstream.refresh_token(acc.refresh_token, proxy=proxy)
@@ -234,6 +295,10 @@ class AccountPool:
                     if acc.status == "exhausted" and bal["total"] > 1:
                         acc.status = "active"
                         acc.cooldown_until = 0.0
+                    # 注册时间以上游为准：腾讯侧体验版套餐的 CreateTime 才是
+                    # 账号真实注册时间，本地 add/import 时写的是登录时间，要被覆盖
+                    if bal.get("registered_at"):
+                        acc.registered_at = bal["registered_at"]
                 else:
                     acc.last_error = f"balance: {bal.get('error', 'unknown')}"[:300]
             out.append({"phone": acc.phone, "masked": acc.masked(),
