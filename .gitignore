@@ -1,0 +1,10 @@
+.venv/
+__pycache__/
+*.pyc
+data/
+jscache/
+.env
+*.tmp
+probe*.py
+models_ok.json
+rates.json

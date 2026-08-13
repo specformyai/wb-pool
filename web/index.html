@@ -1,0 +1,267 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<title>wb-pool · WorkBuddy 账号池</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/static/app.css">
+</head>
+<body>
+<div class="grain"></div>
+<div class="glow glow-a"></div>
+<div class="glow glow-b"></div>
+
+<header class="topbar">
+  <div class="brand">
+    <div class="brand-mark"><i data-lucide="layers"></i></div>
+    <div class="brand-text">
+      <span class="brand-name">wb<em>pool</em></span>
+      <span class="brand-sub">WorkBuddy 账号池反向代理</span>
+    </div>
+  </div>
+  <div class="topbar-right">
+    <div class="key-slot">
+      <i data-lucide="key-round"></i>
+      <input id="adminKey" type="password" placeholder="管理密钥" autocomplete="off">
+      <button id="saveKey" class="mini" title="保存密钥"><i data-lucide="check"></i></button>
+    </div>
+    <div class="pill" id="healthPill"><span class="dot"></span><span id="healthTxt">连接中</span></div>
+  </div>
+</header>
+
+<nav class="tabs" id="tabs">
+  <button class="tab active" data-view="overview"><i data-lucide="gauge"></i><span>总览</span></button>
+  <button class="tab" data-view="accounts"><i data-lucide="users"></i><span>账号池</span></button>
+  <button class="tab" data-view="register"><i data-lucide="smartphone"></i><span>添加账号</span></button>
+  <button class="tab" data-view="models"><i data-lucide="boxes"></i><span>模型与倍率</span></button>
+  <button class="tab" data-view="proxy"><i data-lucide="globe"></i><span>出口代理</span></button>
+  <button class="tab" data-view="chat"><i data-lucide="message-square"></i><span>对话调试</span></button>
+  <button class="tab" data-view="api"><i data-lucide="plug"></i><span>接入方式</span></button>
+</nav>
+
+<main>
+<!-- ══════════════ 总览 ══════════════ -->
+<section class="view active" id="view-overview">
+  <div class="hero">
+    <div class="hero-num" id="heroCredits">—</div>
+    <div class="hero-label">池内可用积分总额</div>
+    <div class="hero-meta">
+      <span><i data-lucide="users"></i><b id="heroUsable">—</b> 可用 / <b id="heroTotal">—</b> 总账号</span>
+      <span><i data-lucide="activity"></i><b id="heroReq">—</b> 次请求</span>
+      <span><i data-lucide="coins"></i><b id="heroSpent">—</b> 已消耗</span>
+    </div>
+  </div>
+
+  <div class="grid-4" id="statCards"></div>
+
+  <div class="card">
+    <div class="card-head">
+      <h2><i data-lucide="list"></i>账号状态</h2>
+      <div class="head-actions">
+        <button class="btn ghost" id="btnRefreshBal"><i data-lucide="refresh-cw"></i>刷新余额</button>
+        <button class="btn ghost" id="btnCheckin"><i data-lucide="calendar-check"></i>立即签到</button>
+      </div>
+    </div>
+    <div id="overviewList" class="acc-strip"></div>
+  </div>
+</section>
+
+<!-- ══════════════ 账号池 ══════════════ -->
+<section class="view" id="view-accounts">
+  <div class="card">
+    <div class="card-head">
+      <h2><i data-lucide="users"></i>账号池</h2>
+      <div class="head-actions">
+        <button class="btn ghost" id="btnPoolReload"><i data-lucide="rotate-cw"></i>重载</button>
+        <button class="btn ghost" id="btnPoolBal"><i data-lucide="wallet"></i>刷新余额</button>
+        <button class="btn ghost" id="btnPoolCheckin"><i data-lucide="calendar-check"></i>全部签到</button>
+      </div>
+    </div>
+    <div class="table-wrap">
+      <table id="poolTable">
+        <thead><tr>
+          <th>账号</th><th>状态</th><th>积分</th><th>已耗</th><th>请求</th>
+          <th>Token 剩余</th><th>签到</th><th>最近错误</th><th>操作</th>
+        </tr></thead>
+        <tbody></tbody>
+      </table>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-head"><h2><i data-lucide="import"></i>手动导入 Token</h2></div>
+    <p class="hint">已经有 access_token（例如从桌面端 CodeBuddy 的 auth 目录取到的）可以直接入池，不必走短信。</p>
+    <div class="form-grid">
+      <label>access_token<textarea id="impAT" rows="3" placeholder="eyJhbGciOi..."></textarea></label>
+      <label>refresh_token（可选，用于自动续期）<textarea id="impRT" rows="2" placeholder="eyJhbGciOi..."></textarea></label>
+      <div class="form-row">
+        <label>标签<input id="impLabel" placeholder="例如 主号"></label>
+        <label>手机号（可选，仅作标识）<input id="impPhone" placeholder="+8613800138000"></label>
+      </div>
+    </div>
+    <button class="btn primary" id="btnImport"><i data-lucide="download"></i>导入并入池</button>
+    <pre class="out" id="impOut"></pre>
+  </div>
+</section>
+
+<!-- ══════════════ 添加账号 ══════════════ -->
+<section class="view" id="view-register">
+  <div class="card">
+    <div class="card-head"><h2><i data-lucide="smartphone"></i>用手机号添加账号</h2></div>
+    <p class="hint">
+      填入<strong>你本人的手机号</strong>，服务端走协议向 WorkBuddy 请求短信验证码，
+      你收到后填进第二步即可完成登录并自动入池。仅支持中国大陆 +86 号码。
+    </p>
+
+    <div class="steps">
+      <div class="step" id="step1">
+        <div class="step-idx">1</div>
+        <div class="step-body">
+          <h3>发送验证码</h3>
+          <div class="form-row">
+            <label>手机号<input id="regPhone" placeholder="13800138000 或 +8613800138000" inputmode="tel"></label>
+            <label>标签（可选）<input id="regLabel" placeholder="主号"></label>
+          </div>
+          <label class="inline-check">
+            <input type="checkbox" id="regUseProxy"><span>通过 resin 出口发起（默认按当前代理模式）</span>
+          </label>
+          <button class="btn primary" id="btnRegStart"><i data-lucide="send"></i>发送验证码</button>
+        </div>
+      </div>
+
+      <div class="step disabled" id="step2">
+        <div class="step-idx">2</div>
+        <div class="step-body">
+          <h3>填入收到的验证码</h3>
+          <div class="code-row">
+            <input id="regCode" placeholder="6 位数字" maxlength="8" inputmode="numeric" class="code-input">
+            <button class="btn primary" id="btnRegFinish" disabled><i data-lucide="log-in"></i>登录并入池</button>
+          </div>
+          <div class="countdown" id="regCountdown"></div>
+        </div>
+      </div>
+    </div>
+    <pre class="out" id="regOut"></pre>
+  </div>
+
+  <div class="card">
+    <div class="card-head"><h2><i data-lucide="gift"></i>邀请进度（只读）</h2></div>
+    <p class="hint">查询你自己账号的邀请码与拉新进度。奖励按真实拉新结算，本工具不提供池内互相邀请。</p>
+    <div class="form-row">
+      <label>账号<select id="invPhone"></select></label>
+      <button class="btn ghost" id="btnInvite"><i data-lucide="search"></i>查询</button>
+    </div>
+    <pre class="out" id="invOut"></pre>
+  </div>
+</section>
+
+<!-- ══════════════ 模型与倍率 ══════════════ -->
+<section class="view" id="view-models">
+  <div class="card">
+    <div class="card-head">
+      <h2><i data-lucide="boxes"></i>可用模型</h2>
+      <div class="head-actions">
+        <button class="btn ghost" id="btnModels"><i data-lucide="refresh-cw"></i>读取缓存</button>
+        <button class="btn primary" id="btnModelsProbe"><i data-lucide="radar"></i>重新探测</button>
+      </div>
+    </div>
+    <p class="hint">上游没有模型列表接口（所有 models 路径实测 404），这里靠候选名单并发探测：返回 200 即可用，400/11102 即不存在。</p>
+    <div id="modelGrid" class="model-grid"></div>
+  </div>
+
+  <div class="card">
+    <div class="card-head">
+      <h2><i data-lucide="scale"></i>倍率（实测记账）</h2>
+      <div class="head-actions">
+        <button class="btn ghost" id="btnRates"><i data-lucide="table"></i>查看</button>
+        <button class="btn primary" id="btnMeasure"><i data-lucide="flask-conical"></i>实测一轮</button>
+      </div>
+    </div>
+    <p class="hint">上游同样没有倍率接口。这里的数值是本代理实测得出：固定 prompt 跑一次，等异步结算后用余额差归因。上游结算有延迟，单次可能为 0，多测几轮更准。</p>
+    <div class="table-wrap">
+      <table id="rateTable">
+        <thead><tr><th>模型</th><th>厂商</th><th>消耗 credits</th><th>tokens</th><th>credits / 1k</th><th>相对倍率</th></tr></thead>
+        <tbody></tbody>
+      </table>
+    </div>
+    <pre class="out" id="rateOut"></pre>
+  </div>
+</section>
+
+<!-- ══════════════ 出口代理 ══════════════ -->
+<section class="view" id="view-proxy">
+  <div class="card">
+    <div class="card-head">
+      <h2><i data-lucide="globe"></i>resin 出口</h2>
+      <div class="head-actions">
+        <button class="btn ghost" id="btnProxyGet"><i data-lucide="refresh-cw"></i>读取</button>
+        <button class="btn primary" id="btnProxyProbe"><i data-lucide="radar"></i>全量探活</button>
+      </div>
+    </div>
+    <p class="hint">探活打的是 <code>copilot.tencent.com</code> 真实业务端点，不是通用探针 —— 有出口能上 ipify 但握不上腾讯的 TLS。</p>
+    <div class="mode-row">
+      <span>模式</span>
+      <div class="seg" id="proxyMode">
+        <button data-mode="off">直连</button>
+        <button data-mode="rotate">轮换出口</button>
+        <button data-mode="fixed">固定</button>
+      </div>
+      <input id="proxyFixedUrl" placeholder="http://127.0.0.1:61010" class="mono">
+      <button class="btn ghost" id="btnProxyMode"><i data-lucide="save"></i>应用</button>
+    </div>
+    <div id="proxyGrid" class="proxy-grid"></div>
+  </div>
+</section>
+
+<!-- ══════════════ 对话调试 ══════════════ -->
+<section class="view" id="view-chat">
+  <div class="card chat-card">
+    <div class="card-head">
+      <h2><i data-lucide="message-square"></i>对话调试</h2>
+      <div class="head-actions">
+        <select id="chatModel" class="mono"></select>
+        <label class="inline-check"><input type="checkbox" id="chatStream" checked><span>流式</span></label>
+        <button class="btn ghost" id="btnChatClear"><i data-lucide="eraser"></i>清空</button>
+      </div>
+    </div>
+    <div class="chat-log" id="chatLog"></div>
+    <div class="chat-input">
+      <textarea id="chatInput" rows="2" placeholder="输入消息，Ctrl+Enter 发送"></textarea>
+      <button class="btn primary" id="btnChatSend"><i data-lucide="send-horizontal"></i></button>
+    </div>
+    <div class="chat-meta" id="chatMeta"></div>
+  </div>
+</section>
+
+<!-- ══════════════ 接入方式 ══════════════ -->
+<section class="view" id="view-api">
+  <div class="card">
+    <div class="card-head"><h2><i data-lucide="plug"></i>接到别的地方用</h2></div>
+    <p class="hint">反代同时提供 OpenAI 与 Anthropic 两套兼容接口，直接填进任何支持自定义 base_url 的客户端。</p>
+    <div class="api-grid">
+      <div class="api-box">
+        <div class="api-label"><i data-lucide="terminal"></i>OpenAI 兼容</div>
+        <div class="kv"><span>Base URL</span><code id="apiBase">—</code></div>
+        <div class="kv"><span>API Key</span><code>你设置的 WB_API_KEY</code></div>
+        <div class="kv"><span>端点</span><code>/v1/chat/completions · /v1/models</code></div>
+      </div>
+      <div class="api-box">
+        <div class="api-label"><i data-lucide="terminal"></i>Anthropic 兼容</div>
+        <div class="kv"><span>Base URL</span><code id="apiBase2">—</code></div>
+        <div class="kv"><span>Header</span><code>x-api-key: &lt;WB_API_KEY&gt;</code></div>
+        <div class="kv"><span>端点</span><code>/v1/messages</code></div>
+      </div>
+    </div>
+    <div class="code-block"><pre id="curlSample"></pre></div>
+  </div>
+</section>
+</main>
+
+<div class="toast-host" id="toastHost"></div>
+<script src="https://unpkg.com/lucide@latest/dist/umd/lucide.js"></script>
+<script src="/static/app.js"></script>
+</body>
+</html>

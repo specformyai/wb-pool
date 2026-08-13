@@ -1,0 +1,17 @@
+[Unit]
+Description=wb-pool (WorkBuddy account pool reverse proxy)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/wb-pool
+EnvironmentFile=/opt/wb-pool/.env
+ExecStart=/opt/wb-pool/.venv/bin/python -m uvicorn app.main:app --host 127.0.0.1 --port 9188 --log-level info
+Restart=always
+RestartSec=5
+StandardOutput=append:/var/log/wb-pool.log
+StandardError=append:/var/log/wb-pool.log
+
+[Install]
+WantedBy=multi-user.target

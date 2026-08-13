@@ -1,0 +1,282 @@
+"""
+WorkBuddy / CodeBuddy 上游 API 封装
+===================================
+所有端点均为 2026-08-13 实测确认：
+  - POST /v2/chat/completions           仅支持 stream=true（stream=false → 11101）
+  - POST /v2/billing/meter/get-user-resource   余额
+  - POST /v2/billing/meter/daily-checkin       每日签到 +100
+  - POST /v2/plugin/auth/state?platform=workbuddy   免 token，用作代理探针
+  - 无模型列表接口（21 条 models 路径全 404）→ 只能候选名单并发探测
+"""
+from __future__ import annotations
+
+import base64
+import json
+import re
+import time
+from typing import Any, Iterator
+
+import httpx
+
+COPILOT = "https://copilot.tencent.com"
+CONSOLE = "https://www.codebuddy.cn"
+UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+      "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36")
+
+# 候选模型名单：探测用。命名不能靠直觉猜（hunyuan-2.0 不存在但 hunyuan-2.0-instruct 在）
+MODEL_CANDIDATES = [
+    "kimi-k3", "kimi-k2.6", "kimi-k2.5",
+    "deepseek-v4-pro", "deepseek-v4-flash", "deepseek-v3", "deepseek-v3-2-volc", "deepseek-r1",
+    "hunyuan-2.0-instruct",
+    "glm-5.2", "glm-5.1", "glm-5.0",
+    "minimax-m2.7",
+    "default", "auto",
+    # 以下历史上出现过/可能开放，保留探测
+    "kimi-k2", "deepseek-v4", "hunyuan-3.0", "hunyuan-turbos", "glm-4.6",
+    "minimax-m2.8", "qwen3-max", "qwen3-coder", "gpt-5.1", "gemini-2.5-pro",
+    "claude-sonnet-4-6", "claude-opus-4-8",
+]
+
+# 已实测的相对倍率（credits/1k tokens 量级参考，仅供 UI 展示，真实计费以上游为准）
+# 上游计费异步，精确倍率由代理侧记账 + 余额差归因得出，见 accounting.py
+MODEL_META: dict[str, dict[str, Any]] = {
+    "kimi-k3":              {"vendor": "Moonshot",  "tier": "flagship", "ctx": 256000},
+    "kimi-k2.6":            {"vendor": "Moonshot",  "tier": "standard", "ctx": 256000},
+    "kimi-k2.5":            {"vendor": "Moonshot",  "tier": "standard", "ctx": 256000},
+    "deepseek-v4-pro":      {"vendor": "DeepSeek",  "tier": "flagship", "ctx": 128000},
+    "deepseek-v4-flash":    {"vendor": "DeepSeek",  "tier": "fast",     "ctx": 128000},
+    "deepseek-v3":          {"vendor": "DeepSeek",  "tier": "standard", "ctx": 128000},
+    "deepseek-v3-2-volc":   {"vendor": "DeepSeek",  "tier": "standard", "ctx": 128000},
+    "deepseek-r1":          {"vendor": "DeepSeek",  "tier": "reasoning","ctx": 64000},
+    "hunyuan-2.0-instruct": {"vendor": "Tencent",   "tier": "standard", "ctx": 32000},
+    "glm-5.2":              {"vendor": "Zhipu",     "tier": "flagship", "ctx": 200000},
+    "glm-5.1":              {"vendor": "Zhipu",     "tier": "standard", "ctx": 200000},
+    "glm-5.0":              {"vendor": "Zhipu",     "tier": "standard", "ctx": 128000},
+    "minimax-m2.7":         {"vendor": "MiniMax",   "tier": "reasoning","ctx": 200000},
+    "default":              {"vendor": "Auto",      "tier": "alias",    "ctx": 128000},
+    "auto":                 {"vendor": "Auto",      "tier": "alias",    "ctx": 128000},
+}
+
+
+def auth_headers(token: str) -> dict[str, str]:
+    return {
+        "Authorization": f"Bearer {token}",
+        "Content-Type": "application/json",
+        "User-Agent": UA,
+        "Accept": "*/*",
+    }
+
+
+def decode_jwt(token: str) -> dict[str, Any]:
+    try:
+        payload = token.split(".")[1]
+        payload += "=" * (-len(payload) % 4)
+        return json.loads(base64.urlsafe_b64decode(payload))
+    except Exception:
+        return {}
+
+
+# --------------------------------------------------------------------------- #
+# 代理探针（免 token）
+# --------------------------------------------------------------------------- #
+def probe_proxy(proxy: str | None, timeout: float = 25.0) -> tuple[bool, str]:
+    """打真实业务端点判断出口可用。通用探针(ipify)绿灯 ≠ 目标可用。"""
+    try:
+        with httpx.Client(proxy=proxy, timeout=timeout, verify=True) as c:
+            r = c.post(f"{COPILOT}/v2/plugin/auth/state?platform=workbuddy",
+                       json={}, headers={"User-Agent": UA, "Content-Type": "application/json"})
+        if r.status_code == 200 and r.json().get("code") == 0:
+            return True, "ok"
+        return False, f"http {r.status_code}"
+    except Exception as exc:  # noqa: BLE001
+        return False, str(exc)[:120]
+
+
+# --------------------------------------------------------------------------- #
+# 余额 / 签到
+# --------------------------------------------------------------------------- #
+def get_balance(token: str, proxy: str | None = None,
+                retries: int = 3, timeout: float = 30.0) -> dict[str, Any]:
+    """
+    返回 {"total": float, "packages": [...], "raw_total_count": int}
+    注册后立刻查会拿到 -1/空（套餐异步发放），故内建重试 + sleep。
+    """
+    body = {
+        "PageNumber": 1, "PageSize": 100, "ProductCode": "p_tcaca", "Status": [0, 3],
+        "PackageStartTimeRangeBegin": "2024-12-01 21:25:00",
+        "PackageStartTimeRangeEnd": time.strftime("%Y-%m-%d %H:%M:%S"),
+    }
+    last = ""
+    for attempt in range(retries):
+        try:
+            with httpx.Client(proxy=proxy, timeout=timeout) as c:
+                r = c.post(f"{COPILOT}/v2/billing/meter/get-user-resource",
+                           json=body, headers=auth_headers(token))
+            j = r.json()
+            data = (j.get("data") or {}).get("Response", {}).get("Data", {}) or {}
+            accs = data.get("Accounts") or []
+            if accs:
+                pkgs = [{
+                    "name": a.get("PackageName"),
+                    "remain": float(a.get("CycleCapacityRemainPrecise") or 0),
+                    "capacity": float(a.get("CycleCapacity") or 0),
+                    "used": float(a.get("CapacityUsed") or 0),
+                    "cycle_end": a.get("CycleEndTime"),
+                    "unit": a.get("CapacityUnit") or "credits",
+                } for a in accs]
+                return {
+                    "total": round(sum(p["remain"] for p in pkgs), 4),
+                    "packages": pkgs,
+                    "raw_total_count": data.get("TotalCount"),
+                    "total_dosage": data.get("TotalDosage"),
+                }
+            last = f"empty accounts (code={j.get('code')} msg={j.get('msg')})"
+        except Exception as exc:  # noqa: BLE001
+            last = str(exc)[:160]
+        if attempt < retries - 1:
+            time.sleep(3)
+    return {"total": -1.0, "packages": [], "error": last}
+
+
+def daily_checkin(token: str, proxy: str | None = None, timeout: float = 30.0) -> dict[str, Any]:
+    try:
+        with httpx.Client(proxy=proxy, timeout=timeout) as c:
+            r = c.post(f"{COPILOT}/v2/billing/meter/daily-checkin",
+                       json={}, headers=auth_headers(token))
+        j = r.json()
+        if j.get("code") == 0:
+            d = j.get("data") or {}
+            return {"ok": True, "credit": d.get("credit", 0),
+                    "streak_days": d.get("streak_days"), "raw": d}
+        return {"ok": False, "error": f"code={j.get('code')} msg={j.get('msg')}"}
+    except Exception as exc:  # noqa: BLE001
+        return {"ok": False, "error": str(exc)[:160]}
+
+
+# --------------------------------------------------------------------------- #
+# Chat —— 上游只支持 stream=true
+# --------------------------------------------------------------------------- #
+class UpstreamError(Exception):
+    def __init__(self, status: int, code: Any, msg: str, body: str = ""):
+        super().__init__(f"upstream {status} code={code}: {msg}")
+        self.status = status
+        self.code = code
+        self.msg = msg
+        self.body = body
+
+
+def stream_chat(token: str, payload: dict[str, Any], proxy: str | None = None,
+                timeout: float = 300.0) -> Iterator[dict[str, Any]]:
+    """
+    向上游发流式请求，逐块 yield 解析后的 JSON chunk。
+    强制 stream=true —— 上游 stream=false 返回 400/11101。
+    """
+    body = dict(payload)
+    body["stream"] = True
+    body.pop("stream_options", None)
+
+    with httpx.Client(proxy=proxy, timeout=httpx.Timeout(timeout, connect=30.0)) as client:
+        with client.stream("POST", f"{COPILOT}/v2/chat/completions",
+                           json=body, headers=auth_headers(token)) as resp:
+            if resp.status_code != 200:
+                raw = resp.read().decode("utf-8", "replace")
+                code, msg = None, raw[:300]
+                try:
+                    j = json.loads(raw)
+                    code, msg = j.get("code"), str(j.get("msg") or j.get("error_msg") or raw)[:300]
+                except Exception:  # noqa: BLE001
+                    pass
+                raise UpstreamError(resp.status_code, code, msg, raw[:600])
+
+            for line in resp.iter_lines():
+                if not line:
+                    continue
+                if isinstance(line, bytes):
+                    line = line.decode("utf-8", "replace")
+                line = line.strip()
+                if not line.startswith("data:"):
+                    continue
+                data = line[5:].strip()
+                if data == "[DONE]":
+                    break
+                try:
+                    yield json.loads(data)
+                except json.JSONDecodeError:
+                    continue
+
+
+def probe_model(token: str, model: str, proxy: str | None = None) -> dict[str, Any]:
+    """探测单个模型是否可用。200+SSE = 可用；400/11102 = 不存在或未授权。"""
+    try:
+        text, echoed = "", None
+        for chunk in stream_chat(token, {
+            "model": model,
+            "messages": [{"role": "user", "content": "hi"}],
+        }, proxy=proxy, timeout=60.0):
+            echoed = echoed or chunk.get("model")
+            for ch in chunk.get("choices") or []:
+                text += (ch.get("delta") or {}).get("content") or ""
+            if len(text) > 8:
+                break
+        return {"model": model, "available": True, "echoed": echoed or model,
+                "sample": text[:40]}
+    except UpstreamError as exc:
+        return {"model": model, "available": False,
+                "reason": f"{exc.code}: {exc.msg}"[:150]}
+    except Exception as exc:  # noqa: BLE001
+        return {"model": model, "available": False, "reason": str(exc)[:150]}
+
+
+# --------------------------------------------------------------------------- #
+# Token 刷新（Keycloak）
+# --------------------------------------------------------------------------- #
+def refresh_token(refresh_tok: str, proxy: str | None = None,
+                  timeout: float = 30.0) -> dict[str, Any]:
+    """
+    Keycloak refresh_token grant。client_id=console。
+    返回 {"access_token","refresh_token","expires_at"} 或 {"error": ...}
+    """
+    try:
+        with httpx.Client(proxy=proxy, timeout=timeout, follow_redirects=True) as c:
+            r = c.post(
+                f"{CONSOLE}/auth/realms/copilot/protocol/openid-connect/token",
+                data={"grant_type": "refresh_token", "refresh_token": refresh_tok,
+                      "client_id": "console"},
+                headers={"Content-Type": "application/x-www-form-urlencoded", "User-Agent": UA},
+            )
+        if r.status_code != 200:
+            return {"error": f"http {r.status_code}: {r.text[:200]}"}
+        j = r.json()
+        at = j.get("access_token")
+        if not at:
+            return {"error": f"no access_token: {r.text[:200]}"}
+        dec = decode_jwt(at)
+        return {
+            "access_token": at,
+            "refresh_token": j.get("refresh_token") or refresh_tok,
+            "expires_at": int(dec.get("exp", 0)) * 1000,
+        }
+    except Exception as exc:  # noqa: BLE001
+        return {"error": str(exc)[:200]}
+
+
+def extract_sms_code(sms: str, phone: str = "") -> str | None:
+    """
+    从短信正文提取验证码。
+    UoomMsg 返回格式是「号码/单价/正文」三段，直接 \\d{6} 会抓到手机号前 6 位。
+    """
+    text = (sms or "").strip()
+    parts = text.split("/", 2)
+    if len(parts) == 3 and parts[0].isdigit():
+        text = parts[2]
+    if phone:
+        text = text.replace(phone.lstrip("+").replace("86", "", 1), " ")
+        text = text.replace(phone.lstrip("+"), " ").replace(phone, " ")
+    for pat in (r"【[^】]*】\s*(\d{4,8})",
+                r"(\d{4,8})\s*为您的",
+                r"验证码[^\d]{0,8}(\d{4,8})",
+                r"(?<!\d)(\d{6})(?!\d)"):
+        m = re.search(pat, text)
+        if m:
+            return m.group(1)
+    return None
