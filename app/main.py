@@ -26,10 +26,12 @@ from fastapi.staticfiles import StaticFiles
 
 from . import upstream
 from . import invite as invite_mod
+from . import uoomsg as uum
 from .accounting import Ledger
 from .pool import Account, AccountPool
 from .proxies import DEFAULT_EXITS, ProxyManager, is_proxy_error
 from .register import Registrar
+from .auto_register import AutoRegistrar
 
 # --------------------------------------------------------------------------- #
 # 配置
@@ -49,12 +51,14 @@ PROXY_HOST = os.environ.get("WB_PROXY_HOST", "127.0.0.1")
 PROXY_FIXED = os.environ.get("WB_PROXY_URL", "")
 CHECKIN_CRON = os.environ.get("WB_CHECKIN_CRON", "5 1 * * *")
 BALANCE_INTERVAL = int(os.environ.get("WB_BALANCE_INTERVAL_MIN", "30"))
+UOOMSG_TOKEN = os.environ.get("WB_UOOMSG_TOKEN", "")
 
 pool = AccountPool(ACCOUNTS_FILE)
 ledger = Ledger(DATA_DIR / "ledger.json")
 pm = ProxyManager(mode=PROXY_MODE, host=PROXY_HOST, fixed_url=PROXY_FIXED,
                   exits=DEFAULT_EXITS, state_file=PROXY_STATE)
 registrar = Registrar(pool, pm)
+auto_registrar = AutoRegistrar(registrar, UOOMSG_TOKEN)
 # 出口故障时账号池要能自己换线重试
 pool.proxy_mgr = pm
 scheduler = BackgroundScheduler(timezone="Asia/Shanghai")
@@ -533,6 +537,39 @@ async def api_reg_finish(request: Request) -> dict[str, Any]:
 @app.get("/api/register/sessions", dependencies=[Depends(require_admin)])
 def api_reg_sessions() -> dict[str, Any]:
     return {"sessions": registrar.sessions()}
+
+
+# ---- 自动注册（uoomsg） ----
+@app.post("/api/auto_register/start", dependencies=[Depends(require_admin)])
+async def api_auto_reg_start(request: Request) -> dict[str, Any]:
+    if not UOOMSG_TOKEN:
+        return JSONResponse({"ok": False, "error": "WB_UOOMSG_TOKEN 未配置"}, status_code=400)
+    b = await request.json()
+    return auto_registrar.start(
+        invite_code=b.get("invite_code", ""),
+        label=b.get("label", ""),
+    )
+
+
+@app.get("/api/auto_register/status/{task_id}", dependencies=[Depends(require_admin)])
+def api_auto_reg_status(task_id: str) -> dict[str, Any]:
+    t = auto_registrar.get(task_id)
+    if not t:
+        return JSONResponse({"error": "任务不存在"}, status_code=404)
+    return t
+
+
+@app.get("/api/auto_register/tasks", dependencies=[Depends(require_admin)])
+def api_auto_reg_tasks() -> dict[str, Any]:
+    return {"tasks": auto_registrar.list_tasks()}
+
+
+@app.get("/api/uoomsg/balance", dependencies=[Depends(require_admin)])
+def api_uoomsg_balance() -> dict[str, Any]:
+    if not UOOMSG_TOKEN:
+        return {"ok": False, "error": "WB_UOOMSG_TOKEN 未配置"}
+    bal = uum.balance(UOOMSG_TOKEN)
+    return {"ok": True, "balance": bal}
 
 
 # ---- 模型 / 倍率 ----

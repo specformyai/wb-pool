@@ -118,8 +118,33 @@
 
 <!-- ══════════════ 添加账号 ══════════════ -->
 <section class="view" id="view-register">
+
+  <!-- ── 自动注册（uoomsg） ── -->
   <div class="card">
-    <div class="card-head"><h2><i data-lucide="smartphone"></i>用手机号添加账号</h2></div>
+    <div class="card-head">
+      <h2><i data-lucide="bot"></i>自动注册（uoomsg 接码）</h2>
+      <button class="btn ghost" id="btnUoomsgBalance"><i data-lucide="wallet"></i>查余额</button>
+    </div>
+    <p class="hint">
+      从 uoomsg 自动取实体卡号 → 腾讯发码 → 等收到验证码 → 自动入池。全程无需人工干预。
+      <span id="uoomsgBalHint" style="margin-left:8px;color:var(--acc)"></span>
+    </p>
+    <div class="form-row">
+      <label>邀请码（可选）
+        <select id="autoRegInviteSel"><option value="">不填</option></select>
+      </label>
+      <label>或手填邀请码<input id="autoRegInviteManual" placeholder="留空则用左侧所选"></label>
+      <label>标签（可选）<input id="autoRegLabel" placeholder="auto"></label>
+    </div>
+    <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+      <button class="btn primary" id="btnAutoReg"><i data-lucide="play"></i>开始自动注册</button>
+      <button class="btn ghost" id="btnAutoRegRefresh"><i data-lucide="refresh-cw"></i>刷新任务列表</button>
+    </div>
+    <div id="autoRegTasks" style="margin-top:12px"></div>
+  </div>
+
+  <div class="card">
+    <div class="card-head"><h2><i data-lucide="smartphone"></i>手动添加账号（自己的号）</h2></div>
     <p class="hint">
       填入<strong>你本人的手机号</strong>，服务端走协议向 WorkBuddy 请求短信验证码，
       你收到后填进第二步即可完成登录并自动入池。仅支持中国大陆 +86 号码。

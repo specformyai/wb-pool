@@ -590,3 +590,97 @@ icons();
 health(); loadOverview(); fillApi();
 loadModels(false).catch(() => {});
 setInterval(health, 30000);
+
+/* ---------- 自动注册（uoomsg） ---------- */
+let autoRegPollTimer = null;
+
+$('#btnUoomsgBalance').onclick = e => run(e.currentTarget, async () => {
+  const d = await api('/api/uoomsg/balance');
+  $('#uoomsgBalHint').textContent = `uoomsg 余额：${d.balance}`;
+});
+
+async function renderAutoRegTasks() {
+  const d = await api('/api/auto_register/tasks');
+  const tasks = (d.tasks || []).slice().reverse(); // 最新的在前
+  const el = $('#autoRegTasks');
+  if (!tasks.length) {
+    el.innerHTML = '<div class="chat-empty" style="padding:12px 0">暂无任务</div>';
+    return;
+  }
+  el.innerHTML = tasks.map(t => {
+    const icon = t.status === 'done' ? '✓' : t.status === 'failed' ? '✗' : t.status === 'running' ? '⟳' : '…';
+    const color = t.status === 'done' ? 'var(--ok)' : t.status === 'failed' ? 'var(--err)' : 'var(--acc)';
+    const last = t.steps.length ? t.steps[t.steps.length - 1] : '';
+    const masked = t.result && t.result.masked ? t.result.masked : '';
+    return `<div class="task-row" data-tid="${t.id}" style="border:1px solid var(--border);border-radius:6px;padding:10px 12px;margin-bottom:6px;cursor:pointer" onclick="toggleTaskLog('${t.id}')">
+      <div style="display:flex;gap:8px;align-items:center">
+        <span style="color:${color};font-weight:700;min-width:16px">${icon}</span>
+        <span style="flex:1;font-size:13px">${masked || `任务 ${t.id}`} <span style="color:var(--txt3);font-size:11px">${t.age}s 前</span></span>
+        <span style="font-size:11px;color:var(--txt3)">${t.status}</span>
+      </div>
+      <div style="font-size:11px;color:var(--txt3);margin-top:4px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${last}</div>
+      <pre id="tasklog-${t.id}" style="display:none;margin-top:8px;font-size:11px;white-space:pre-wrap;color:var(--txt2)">${(t.steps || []).join('\n')}</pre>
+    </div>`;
+  }).join('');
+}
+
+function toggleTaskLog(tid) {
+  const el = $(`#tasklog-${tid}`);
+  if (el) el.style.display = el.style.display === 'none' ? 'block' : 'none';
+}
+
+function startAutoRegPoll() {
+  if (autoRegPollTimer) return;
+  autoRegPollTimer = setInterval(async () => {
+    await renderAutoRegTasks().catch(() => {});
+    // 如果没有运行中的任务就停止轮询
+    const d = await api('/api/auto_register/tasks').catch(() => ({ tasks: [] }));
+    const running = (d.tasks || []).some(t => t.status === 'running' || t.status === 'pending');
+    if (!running) {
+      clearInterval(autoRegPollTimer);
+      autoRegPollTimer = null;
+      loadOverview().catch(() => {});
+      loadInviteCodes().catch(() => {});
+    }
+  }, 3000);
+}
+
+$('#btnAutoReg').onclick = e => run(e.currentTarget, async () => {
+  const inviteCode = ($('#autoRegInviteManual').value.trim() || $('#autoRegInviteSel').value || '');
+  const label = $('#autoRegLabel').value.trim();
+  const r = await api('/api/auto_register/start', {
+    method: 'POST',
+    body: JSON.stringify({ invite_code: inviteCode, label }),
+  });
+  toast(`自动注册任务已启动（${r.task_id}）`, 'ok');
+  await renderAutoRegTasks().catch(() => {});
+  startAutoRegPoll();
+});
+
+$('#btnAutoRegRefresh').onclick = e => run(e.currentTarget, renderAutoRegTasks);
+
+// 把 autoRegInviteSel 同步进 loadInviteCodes
+const _origLoad = loadInviteCodes;
+loadInviteCodes = async function () {
+  const res = await _origLoad();
+  const ok = (res || []).filter(c => c.code);
+  const sel = $('#autoRegInviteSel');
+  if (sel) {
+    sel.innerHTML = '<option value="">不填</option>' + ok.map(c =>
+      `<option value="${c.code}">${c.masked} · ${c.code}</option>`).join('');
+  }
+  return res;
+};
+
+// 进入 register tab 时刷一次任务列表
+const _origTab = document.querySelectorAll ? null : null;
+document.querySelectorAll('.tab[data-view]').forEach(btn => {
+  btn.addEventListener('click', () => {
+    if (btn.dataset.view === 'register') {
+      renderAutoRegTasks().catch(() => {});
+      api('/api/uoomsg/balance').then(d => {
+        $('#uoomsgBalHint').textContent = `uoomsg 余额：${d.balance}`;
+      }).catch(() => {});
+    }
+  });
+});
