@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import base64
 import json
+import random
 import re
 import time
 from typing import Any, Iterator
@@ -22,6 +23,43 @@ COPILOT = "https://copilot.tencent.com"
 CONSOLE = "https://www.codebuddy.cn"
 UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
       "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36")
+
+# 用于注册时伪装不同浏览器/设备，避免每次请求特征完全一致
+_WIN_VERS  = ["10.0", "11.0"]
+_MAC_VERS  = ["10_15_7", "14_4_1", "13_6_4"]
+_CHROME    = [131, 132, 133, 134, 135]
+_SAFARI_VER = "537.36"
+
+def random_ua() -> str:
+    """每次注册生成一个不同的 Chrome UA（Windows / macOS 随机）。"""
+    chrome = random.choice(_CHROME)
+    if random.random() < 0.5:                  # Windows
+        win = random.choice(_WIN_VERS)
+        return (f"Mozilla/5.0 (Windows NT {win}; Win64; x64) "
+                f"AppleWebKit/{_SAFARI_VER} (KHTML, like Gecko) "
+                f"Chrome/{chrome}.0.0.0 Safari/{_SAFARI_VER}")
+    else:                                       # macOS
+        mac = random.choice(_MAC_VERS)
+        return (f"Mozilla/5.0 (Macintosh; Intel Mac OS X {mac}) "
+                f"AppleWebKit/{_SAFARI_VER} (KHTML, like Gecko) "
+                f"Chrome/{chrome}.0.0.0 Safari/{_SAFARI_VER}")
+
+def random_accept_language() -> str:
+    choices = [
+        "zh-CN,zh;q=0.9,en;q=0.8",
+        "zh-CN,zh;q=0.9",
+        "zh-TW,zh;q=0.9,en-US;q=0.8,en;q=0.7",
+        "zh-CN,zh;q=0.9,en-US;q=0.8",
+        "en-US,en;q=0.9,zh-CN;q=0.8,zh;q=0.7",
+    ]
+    return random.choice(choices)
+
+def random_screen() -> dict[str, int]:
+    """常见显示器分辨率（注册请求 headers 里可选填）。"""
+    screens = [(1920, 1080), (2560, 1440), (1366, 768),
+               (1440, 900), (1280, 800), (1680, 1050)]
+    w, h = random.choice(screens)
+    return {"width": w, "height": h}
 
 # 候选模型名单：探测用。命名不能靠直觉猜（hunyuan-2.0 不存在但 hunyuan-2.0-instruct 在）
 MODEL_CANDIDATES = [
@@ -148,7 +186,13 @@ def daily_checkin(token: str, proxy: str | None = None, timeout: float = 30.0) -
             d = j.get("data") or {}
             return {"ok": True, "credit": d.get("credit", 0),
                     "streak_days": d.get("streak_days"), "raw": d}
-        return {"ok": False, "error": f"code={j.get('code')} msg={j.get('msg')}"}
+        msg = str(j.get("msg") or "")
+        # 上游 10001 = 今天已签到。这是"已完成"不是失败，
+        # 否则 last_checkin 永远写不进去，每天会重复白打上游。
+        if j.get("code") == 10001 or "已签到" in msg:
+            return {"ok": False, "already": True, "credit": 0,
+                    "error": f"code={j.get('code')} msg={msg}"}
+        return {"ok": False, "error": f"code={j.get('code')} msg={msg}"}
     except Exception as exc:  # noqa: BLE001
         return {"ok": False, "error": str(exc)[:160]}
 

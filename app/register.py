@@ -28,7 +28,7 @@ import httpx
 
 from . import upstream
 from .pool import Account
-from .upstream import CONSOLE, COPILOT, UA
+from .upstream import CONSOLE, COPILOT, UA, random_ua, random_accept_language
 
 REDIRECT_URI = "https://www.codebuddy.cn/login/?platform=workbuddy"
 SESSION_TTL = 600.0     # 短信验证码 5 分钟有效，会话留 10 分钟
@@ -41,11 +41,16 @@ class RegisterSession:
         self.proxy = proxy
         self.created_at = time.time()
         self.state = ""
+        _ua  = random_ua()
+        _lang = random_accept_language()
         self.client = httpx.Client(
             proxy=proxy, timeout=httpx.Timeout(60.0, connect=30.0),
             follow_redirects=True,
-            headers={"User-Agent": UA, "Accept-Language": "zh-CN,zh;q=0.9"},
+            headers={"User-Agent": _ua, "Accept-Language": _lang},
         )
+        # 每次注册打印指纹，方便对照腾讯风控日志
+        self._ua = _ua
+        self._lang = _lang
         self.log: list[str] = []
 
     def note(self, msg: str) -> None:
@@ -130,6 +135,7 @@ class Registrar:
             sess.close()
             return {"ok": False, "error": f"发码异常: {exc}"[:300]}
 
+        sess.note(f"UA: {sess._ua[:60]}…  lang: {sess._lang}")
         with self._lock:
             self._sessions[sess.id] = sess
         return {"ok": True, "session_id": sess.id, "phone": phone,
@@ -147,6 +153,10 @@ class Registrar:
         code = re.sub(r"\D", "", code or "")
         if not code:
             return {"ok": False, "error": "验证码为空"}
+
+        # 只有「成功」和「不可恢复的错误」才销毁会话；
+        # 验证码填错要保留会话——上游发码有频率限制，不能让用户重新发码。
+        keep_session = False
 
         try:
             # ① 重新拉 auth 页拿 form action（含一次性 execution/tab_id）
@@ -176,7 +186,10 @@ class Registrar:
                 detail = (err.group(1).strip() if err else "")[:120]
                 if "{{" in detail or not detail:
                     detail = "验证码错误或已过期"
-                return {"ok": False, "error": f"验证码校验失败：{detail}", "log": sess.log}
+                keep_session = True
+                sess.note(f"验证码校验失败：{detail}（会话保留，可直接重填）")
+                return {"ok": False, "error": f"验证码校验失败：{detail}",
+                        "session_id": sess.id, "can_retry": True, "log": sess.log}
 
             # ③ 静默授权（跟随重定向拿到 console 会话）
             sess.client.get(f"{CONSOLE}/console/accounts")
@@ -239,10 +252,11 @@ class Registrar:
         except Exception as exc:  # noqa: BLE001
             return {"ok": False, "error": f"登录异常: {exc}"[:300], "log": sess.log}
         finally:
-            with self._lock:
-                s = self._sessions.pop(session_id, None)
-            if s:
-                s.close()
+            if not keep_session:
+                with self._lock:
+                    s = self._sessions.pop(session_id, None)
+                if s:
+                    s.close()
         return result
 
     def sessions(self) -> list[dict[str, Any]]:

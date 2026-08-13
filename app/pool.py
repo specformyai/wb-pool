@@ -242,6 +242,42 @@ class AccountPool:
         self.save()
         return out
 
+    def checkin_one(self, key: str, proxy: str | None = None,
+                    force: bool = False) -> dict[str, Any]:
+        """单账号签到。force=True 时忽略 last_checkin 直接打上游。"""
+        acc = self.find(key)
+        if not acc:
+            return {"ok": False, "error": "account not found"}
+        if not acc.access_token:
+            return {"ok": False, "error": "no access_token"}
+        if acc.status in ("dead", "disabled"):
+            return {"ok": False, "error": f"account is {acc.status}"}
+        today = time.strftime("%Y-%m-%d")
+        if acc.last_checkin == today and not force:
+            return {"ok": False, "skipped": True, "masked": acc.masked(),
+                    "error": "今天已签到"}
+        res = upstream.daily_checkin(acc.access_token, proxy=proxy)
+        with self._lock:
+            if res.get("ok") or res.get("already"):
+                # already = 上游说今天已签到，同样要落 last_checkin，
+                # 否则每次点都会白打一次上游、UI 也一直显示"—"
+                acc.last_checkin = today
+                acc.last_error = ""
+            else:
+                acc.last_error = f"checkin: {res.get('error')}"[:300]
+        self.save()
+        # 签到成功后余额会变，只刷这一个账号
+        # 注意 get_balance 没有 "ok" 字段，失败时 total = -1
+        if res.get("ok"):
+            bal = upstream.get_balance(acc.access_token, proxy=proxy, retries=2)
+            if bal.get("total", -1) >= 0:
+                with self._lock:
+                    acc.credits_total = bal["total"]
+                    acc.credits_checked_at = time.time()
+                self.save()
+        return {"masked": acc.masked(), "phone": acc.phone,
+                "credits_total": acc.credits_total, **res}
+
     def checkin_all(self, proxy: str | None = None) -> list[dict[str, Any]]:
         out = []
         today = time.strftime("%Y-%m-%d")
@@ -254,8 +290,10 @@ class AccountPool:
                 continue
             res = upstream.daily_checkin(acc.access_token, proxy=proxy)
             with self._lock:
-                if res.get("ok"):
+                if res.get("ok") or res.get("already"):
                     acc.last_checkin = today
+                    if res.get("already"):
+                        acc.last_error = ""
                 else:
                     acc.last_error = f"checkin: {res.get('error')}"[:300]
             out.append({"phone": acc.phone, "masked": acc.masked(), **res})

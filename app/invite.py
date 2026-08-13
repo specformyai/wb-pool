@@ -41,12 +41,15 @@ BIND_ERRORS = {
     12313: "不能用自己的邀请码（换池里另一个账号的码）",
     12314: "这个邀请码不属于当前活动",
     12312: "活动已结束",
-    12311: "邀请码无效",
+    12311: "只有活动期内注册的新用户才能绑邀请码（该号注册时活动已截止）",
 }
 
 
 def _get(path: str, token: str, proxy: str | None = None,
-         base: str = V2) -> dict[str, Any]:
+         base: str | None = None) -> dict[str, Any]:
+    # 注意：base 必须在调用时解析。写成 `base: str = V2` 会在 import 时把值绑死，
+    # 之后改 invite.V2（测试重定向、或换域名）都不生效。
+    base = base if base is not None else V2
     with httpx.Client(proxy=proxy, timeout=25, follow_redirects=True) as c:
         r = c.get(base + path, headers=upstream.auth_headers(token))
     if r.status_code != 200:
@@ -83,7 +86,7 @@ def overview(token: str, proxy: str | None = None) -> dict[str, Any]:
         "cap_reached": prog.get("cap_reached", False),
         "rewards": rew,
         "records": rec,
-        "v1_code": _get("/my-code", token, proxy, base=V1).get("inviteCode", ""),
+        "v1_code": _get("/my-code", token, proxy, base=V1).get("inviteCode", ""),  # V1 见上方注释
         "v1_note": "v1 活动已结束，该码仅供参考，实际请用上面的 invite_code",
     }
 

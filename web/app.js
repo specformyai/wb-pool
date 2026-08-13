@@ -29,7 +29,10 @@ async function api(path, opts = {}) {
   let data; try { data = JSON.parse(txt); } catch { data = { raw: txt }; }
   if (!r.ok) {
     const m = data?.detail?.error?.message || data?.error || data?.detail || txt.slice(0, 300);
-    throw new Error(typeof m === 'string' ? m : JSON.stringify(m));
+    const e = new Error(typeof m === 'string' ? m : JSON.stringify(m));
+    e.status = r.status;
+    e.data = data;          // 调用方需要看具体字段（如 can_retry）
+    throw e;
   }
   return data;
 }
@@ -160,19 +163,25 @@ async function loadPool() {
       <td class="num">${fmt(a.credits_spent, 3)}</td>
       <td class="num">${a.request_count}</td>
       <td class="num">${a.expires_in_h > 0 ? a.expires_in_h + ' h' : '已过期'}</td>
+      <td style="font-size:11px;color:var(--txt3)">${a.registered_at ? a.registered_at.slice(0, 10) : '—'}</td>
       <td style="font-size:11.5px;color:var(--txt3)">${a.last_checkin || '—'}</td>
       <td class="err-cell" title="${(a.last_error || '').replace(/"/g, '&quot;')}">${a.last_error || '—'}</td>
       <td><div class="row-actions">
+        <button class="btn tiny ghost" data-act="ci" data-p="${a.phone}" title="单独签到"><i data-lucide="calendar-check-2"></i></button>
         <button class="btn tiny ghost" data-act="rt" data-p="${a.phone}" title="刷新 token"><i data-lucide="refresh-cw"></i></button>
         <button class="btn tiny ghost" data-act="tg" data-p="${a.phone}" data-s="${a.status === 'disabled' ? 'active' : 'disabled'}" title="启用/停用"><i data-lucide="power"></i></button>
         <button class="btn tiny danger" data-act="rm" data-p="${a.phone}" title="移除"><i data-lucide="trash-2"></i></button>
       </div></td>
-    </tr>`).join('') : '<tr><td colspan="9" style="text-align:center;color:var(--txt3);padding:30px">池子是空的</td></tr>';
+    </tr>`).join('') : '<tr><td colspan="10" style="text-align:center;color:var(--txt3);padding:30px">池子是空的</td></tr>';
   icons();
 
   tb.querySelectorAll('button[data-act]').forEach(b => b.onclick = () => run(b, async () => {
     const p = b.dataset.p, act = b.dataset.act;
-    if (act === 'rm') {
+    if (act === 'ci') {
+      const r = await api('/api/pool/checkin_one', { method: 'POST', body: JSON.stringify({ phone: p }) });
+      if (r.skipped || r.already) toast(`${r.masked || p} 今天已签到`, 'info');
+      else toast(r.ok ? `签到成功 +${r.credit} 积分，余额 ${r.credits_total}` : `签到失败: ${r.error}`, r.ok ? 'ok' : 'err');
+    } else if (act === 'rm') {
       if (!confirm(`确认从池中移除 ${p}？`)) return;
       await api('/api/pool/remove', { method: 'POST', body: JSON.stringify({ phone: p }) });
       toast('已移除', 'ok');
@@ -254,7 +263,20 @@ $('#btnRegFinish').onclick = e => run(e.currentTarget, async () => {
     clearInterval(regTimer); $('#regCountdown').textContent = '';
     $('#regCode').value = '';
     loadOverview(); health();
-  } catch (err) { showOut($('#regOut'), err.message, true); throw err; }
+  } catch (err) {
+    // 验证码填错时后端保留会话（can_retry），前端也要让用户能直接重填，
+    // 不能把 step2 关掉逼他重新发码——上游发码有频率限制。
+    const retry = !!(err.data && err.data.can_retry);
+    showOut($('#regOut'), err.message, true);
+    if (retry) {
+      $('#regCode').value = '';
+      $('#regCode').focus();
+      $('#btnRegFinish').disabled = false;
+      toast('验证码不对，直接重填即可（无需重新发码）', 'err');
+      return;
+    }
+    throw err;
+  }
 });
 $('#regCode').addEventListener('keydown', e => { if (e.key === 'Enter') $('#btnRegFinish').click(); });
 

@@ -411,6 +411,13 @@ def api_checkin() -> dict[str, Any]:
     return {"ok": True, "results": pool.checkin_all(proxy=pm.pick())}
 
 
+@app.post("/api/pool/checkin_one", dependencies=[Depends(require_admin)])
+async def api_checkin_one(request: Request) -> dict[str, Any]:
+    b = await request.json()
+    return pool.checkin_one(b.get("phone", ""), proxy=pm.pick(),
+                            force=bool(b.get("force")))
+
+
 @app.post("/api/pool/status", dependencies=[Depends(require_admin)])
 async def api_set_status(request: Request) -> dict[str, Any]:
     b = await request.json()
