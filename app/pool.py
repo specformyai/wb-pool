@@ -249,8 +249,10 @@ class AccountPool:
         with self._lock:
             if res.get("error"):
                 acc.last_error = f"refresh failed: {res['error']}"[:300]
-                if any(k in res["error"].lower() for k in AUTH_KEYWORDS):
-                    acc.status = "dead"
+                # 注意：不能因为 refresh 失败就把账号标 dead。
+                # 上游 Keycloak 的 client_id=console 不接受 refresh_token grant，
+                # 对**所有**账号都返回 401 unauthorized_client（181 正常号实测同样 401）。
+                # access_token 本身有效期约 60 天，判活只看对话/余额路径。
                 self.save()
                 return False
             acc.access_token = res["access_token"]
