@@ -137,7 +137,8 @@ class Registrar:
                 "message": "验证码已发送，请在 5 分钟内提交", "log": sess.log}
 
     # ---------------- 阶段二：提交验证码 ----------------
-    def finish(self, session_id: str, code: str, label: str = "") -> dict[str, Any]:
+    def finish(self, session_id: str, code: str, label: str = "",
+               invite_code: str = "") -> dict[str, Any]:
         self._gc()
         with self._lock:
             sess = self._sessions.get(session_id)
@@ -213,11 +214,27 @@ class Registrar:
             )
             ok, how = self.pool.add(acc)
             sess.note(f"入池: {how}")
+
+            # ⑥ 绑邀请码（新号填别人的码，邀请人得奖励）
+            invite_result = None
+            if invite_code.strip():
+                from . import invite as invite_mod
+                invite_result = invite_mod.bind(access, invite_code, proxy=sess.proxy)
+                sess.note("邀请码：" + ("绑定成功" if invite_result.get("ok")
+                                     else invite_result.get("error", "失败")))
+                if invite_result.get("ok"):
+                    time.sleep(3)
+                    bal = upstream.get_balance(access, proxy=sess.proxy, retries=2)
+                    acc.credits_total = bal.get("total", acc.credits_total)
+                    self.pool.save()
+                    sess.note(f"绑定后余额={bal.get('total')}")
+
             result = {
                 "ok": True, "action": how, "phone": sess.phone,
                 "masked": acc.masked(), "uid": acc.uid,
                 "credits": bal.get("total"), "packages": bal.get("packages", []),
-                "expires_at": acc.expires_at, "log": sess.log,
+                "expires_at": acc.expires_at, "invite": invite_result,
+                "log": sess.log,
             }
         except Exception as exc:  # noqa: BLE001
             return {"ok": False, "error": f"登录异常: {exc}"[:300], "log": sess.log}

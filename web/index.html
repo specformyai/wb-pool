@@ -125,6 +125,13 @@
             <label>手机号<input id="regPhone" placeholder="13800138000 或 +8613800138000" inputmode="tel"></label>
             <label>标签（可选）<input id="regLabel" placeholder="主号"></label>
           </div>
+          <div class="form-row">
+            <label>邀请码（可选，注册成功后邀请人得积分）
+              <select id="regInviteSel"><option value="">不填</option></select>
+            </label>
+            <label>或手填邀请码<input id="regInviteManual" placeholder="15 位邀请码，留空则用左侧所选"></label>
+          </div>
+          <div class="hint-inline" id="regInviteHint"></div>
           <label class="inline-check">
             <input type="checkbox" id="regUseProxy"><span>通过 resin 出口发起（默认按当前代理模式）</span>
           </label>
@@ -148,14 +155,36 @@
   </div>
 
   <div class="card">
-    <div class="card-head"><h2><i data-lucide="gift"></i>邀请进度（只读）</h2></div>
-    <p class="hint">查询你自己账号的邀请码与拉新进度。奖励按真实拉新结算，本工具不提供池内互相邀请。</p>
+    <div class="card-head">
+      <h2><i data-lucide="gift"></i>邀请码</h2>
+      <button class="btn ghost" id="btnInviteCodes"><i data-lucide="refresh-cw"></i>刷新池内邀请码</button>
+    </div>
+    <p class="hint">
+      注册新号时在上面的下拉里选一个已入池账号的邀请码，注册成功后邀请人拿积分。单账号奖励上限 30000 积分。腾讯不允许一个号绑自己的码。
+    </p>
+    <div class="invite-grid" id="inviteGrid"></div>
+  </div>
+
+  <div class="card">
+    <div class="card-head"><h2><i data-lucide="link-2"></i>给已有账号补绑邀请码</h2></div>
+    <p class="hint">注册当时忘填邀请码的账号可以在这里补绑，只有从没绑过的账号能成功。</p>
+    <div class="form-row">
+      <label>账号<select id="bindPhone"></select></label>
+      <label>邀请码<input id="bindCode" placeholder="15 位邀请码"></label>
+      <button class="btn ghost" id="btnBind"><i data-lucide="link"></i>绑定</button>
+    </div>
+    <pre class="out" id="bindOut"></pre>
+  </div>
+
+  <div class="card">
+    <div class="card-head"><h2><i data-lucide="chart-no-axes-column"></i>邀请明细</h2></div>
     <div class="form-row">
       <label>账号<select id="invPhone"></select></label>
       <button class="btn ghost" id="btnInvite"><i data-lucide="search"></i>查询</button>
     </div>
     <pre class="out" id="invOut"></pre>
   </div>
+
 </section>
 
 <!-- ══════════════ 模型与倍率 ══════════════ -->

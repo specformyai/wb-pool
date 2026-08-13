@@ -25,6 +25,7 @@ from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
 from . import upstream
+from . import invite as invite_mod
 from .accounting import Ledger
 from .pool import Account, AccountPool
 from .proxies import DEFAULT_EXITS, ProxyManager
@@ -473,7 +474,8 @@ async def api_reg_start(request: Request) -> dict[str, Any]:
 @app.post("/api/register/finish", dependencies=[Depends(require_admin)])
 async def api_reg_finish(request: Request) -> dict[str, Any]:
     b = await request.json()
-    res = registrar.finish(b.get("session_id", ""), b.get("code", ""), b.get("label", ""))
+    res = registrar.finish(b.get("session_id", ""), b.get("code", ""),
+                           b.get("label", ""), b.get("invite_code", ""))
     if not res.get("ok"):
         return JSONResponse(res, status_code=400)
     return res
@@ -577,31 +579,64 @@ async def api_proxy_mode(request: Request) -> dict[str, Any]:
     return {"ok": True, "mode": pm.mode, "fixed_url": pm.fixed_url}
 
 
-# ---- 邀请（只读查询，不做自邀请闭环） ----
+# ---- 邀请 ----
 @app.get("/api/invite", dependencies=[Depends(require_admin)])
 def api_invite(phone: str = "") -> dict[str, Any]:
-    """
-    查询自己账号的邀请码与拉新进度（只读）。
-    奖励按真实拉新结算（valid_invite_count / payment_credits / 上限 30000），
-    本工具不提供池内账号互相邀请的功能。
-    """
-    import httpx
+    """某个账号的邀请总览：邀请码、邀请链接、拉新进度、已得奖励、好友记录。"""
     acc = pool.find(phone) if phone else (pool.all()[0] if pool.all() else None)
     if not acc:
         raise HTTPException(404, "账号不存在")
-    base = "https://copilot.tencent.com/activity/workbuddy/invitation/v2"
-    out: dict[str, Any] = {"phone": acc.phone, "masked": acc.masked()}
+    d = invite_mod.overview(acc.access_token, proxy=pm.pick())
+    d.update({"phone": acc.phone, "masked": acc.masked()})
+    return d
+
+
+@app.get("/api/invite/codes", dependencies=[Depends(require_admin)])
+def api_invite_codes() -> dict[str, Any]:
+    """
+    池里所有账号的邀请码 —— 注册新号时从这里挑一个填进注册表单。
+    自己的码不能绑自己（服务端 12313），所以每个条目带上 phone 供前端排除。
+    """
     proxy = pm.pick()
-    for name, path in (("my_code", "/my-code"), ("my_progress", "/my-progress"),
-                       ("my_rewards", "/my-rewards"), ("records", "/invite-records")):
+    out = []
+    for a in pool.all():
+        if not a.usable():
+            out.append({"phone": a.phone, "masked": a.masked(),
+                        "code": "", "error": f"账号状态 {a.status}"})
+            continue
         try:
-            with httpx.Client(proxy=proxy, timeout=25) as c:
-                r = c.get(base + path, headers=upstream.auth_headers(acc.access_token))
-            out[name] = r.json() if r.status_code == 200 else {"http": r.status_code,
-                                                               "body": r.text[:200]}
+            d = invite_mod.overview(a.access_token, proxy=proxy)
+            out.append({
+                "phone": a.phone, "masked": a.masked(), "label": a.label,
+                "code": d.get("invite_code", ""),
+                "link": d.get("invite_link", ""),
+                "invited": d.get("invite_count", 0),
+                "valid_invited": d.get("valid_invite_count", 0),
+                "earned": d.get("total_credits", 0),
+                "cap": d.get("cap_value", 30000),
+                "cap_reached": d.get("cap_reached", False),
+            })
         except Exception as exc:  # noqa: BLE001
-            out[name] = {"error": str(exc)[:150]}
-    return out
+            out.append({"phone": a.phone, "masked": a.masked(),
+                        "code": "", "error": str(exc)[:120]})
+    return {"codes": out,
+            "note": "注册新账号时填其中一个码，注册成功后邀请人得奖励；不能填被注册号自己的码"}
+
+
+@app.post("/api/invite/bind", dependencies=[Depends(require_admin)])
+async def api_invite_bind(request: Request) -> dict[str, Any]:
+    """
+    给池里某个已有账号补绑邀请码（当时注册忘填的场景）。
+    body: {"phone": "...", "invite_code": "..."}
+    """
+    b = await request.json()
+    acc = pool.find(b.get("phone", ""))
+    if not acc:
+        raise HTTPException(404, "账号不存在")
+    r = invite_mod.bind(acc.access_token, b.get("invite_code", ""), proxy=pm.pick())
+    if r.get("ok"):
+        pool.refresh_balance(acc, proxy=pm.pick())
+    return r
 
 
 # --------------------------------------------------------------------------- #

@@ -54,6 +54,7 @@ $$('#tabs .tab').forEach(t => t.onclick = () => {
   $('#view-' + t.dataset.view).classList.add('active');
   const v = t.dataset.view;
   if (v === 'accounts') loadPool();
+  if (v === 'register') loadInviteCodes().catch(() => {});
   if (v === 'models') loadModels(false);
   if (v === 'proxy') loadProxy();
   if (v === 'overview') loadOverview();
@@ -237,12 +238,18 @@ $('#btnRegFinish').onclick = e => run(e.currentTarget, async () => {
   const code = $('#regCode').value.trim();
   if (!code) return toast('请填写验证码', 'err');
   try {
+    const inviteCode = ($('#regInviteManual').value.trim() || $('#regInviteSel').value || '');
     const r = await api('/api/register/finish', {
       method: 'POST',
-      body: JSON.stringify({ session_id: regSession, code, label: $('#regLabel').value.trim() })
+      body: JSON.stringify({ session_id: regSession, code,
+                             label: $('#regLabel').value.trim(),
+                             invite_code: inviteCode })
     });
     showOut($('#regOut'), r);
-    toast(`${r.masked} 已入池，积分 ${r.credits}`, 'ok');
+    let extra = '';
+    if (r.invite) extra = r.invite.ok ? '，邀请码已绑定' : `，邀请码未绑定(${r.invite.error})`;
+    toast(`${r.masked} 已入池，积分 ${r.credits}${extra}`, r.invite && !r.invite.ok ? 'info' : 'ok');
+    loadInviteCodes().catch(() => {});
     $('#step2').classList.add('done');
     clearInterval(regTimer); $('#regCountdown').textContent = '';
     $('#regCode').value = '';
@@ -255,6 +262,66 @@ $('#btnInvite').onclick = e => run(e.currentTarget, async () => {
   const p = $('#invPhone').value;
   const r = await api('/api/invite?phone=' + encodeURIComponent(p));
   showOut($('#invOut'), r);
+});
+
+/* ---------- 邀请码 ---------- */
+let INV_CODES = [];
+async function loadInviteCodes() {
+  const d = await api('/api/invite/codes');
+  INV_CODES = d.codes || [];
+  const ok = INV_CODES.filter(c => c.code);
+
+  $('#inviteGrid').innerHTML = INV_CODES.length ? INV_CODES.map(c => c.code ? `
+    <div class="inv-card">
+      <div class="inv-top">
+        <span class="inv-phone">${c.masked}</span>
+        ${c.cap_reached ? '<span class="badge exhausted">已达上限</span>' : ''}
+      </div>
+      <div class="inv-code" data-copy="${c.code}" title="点击复制">${c.code}<i data-lucide="copy"></i></div>
+      <div class="inv-stats">
+        <span>已邀 <b>${c.invited}</b></span>
+        <span>有效 <b>${c.valid_invited}</b></span>
+        <span>得分 <b>${c.earned}</b>/${c.cap}</span>
+      </div>
+      <div class="inv-link" data-copy="${c.link}" title="点击复制邀请链接">复制邀请链接<i data-lucide="link"></i></div>
+    </div>` : `
+    <div class="inv-card bad">
+      <div class="inv-top"><span class="inv-phone">${c.masked}</span></div>
+      <div class="inv-err">${c.error || '取不到邀请码'}</div>
+      <div class="inv-note">该账号不可用，取不到邀请码</div>
+    </div>`).join('') : '<div class="chat-empty">池子是空的</div>';
+  icons();
+
+  $$('#inviteGrid [data-copy]').forEach(el => el.onclick = async () => {
+    try { await navigator.clipboard.writeText(el.dataset.copy); toast('已复制', 'ok'); }
+    catch { toast('复制失败，手动选中吧', 'err'); }
+  });
+
+  // 注册向导的下拉
+  const sel = $('#regInviteSel');
+  if (sel) {
+    sel.innerHTML = '<option value="">不填</option>' + ok.map(c =>
+      `<option value="${c.code}">${c.masked} · ${c.code} · 已邀 ${c.invited}</option>`).join('');
+  }
+  const bs = $('#bindPhone');
+  if (bs) bs.innerHTML = INV_CODES.map(c => `<option value="${c.phone}">${c.masked}</option>`).join('');
+  const hint = $('#regInviteHint');
+  if (hint) hint.textContent = ok.length
+    ? `池内有 ${ok.length} 个可用邀请码。注意：不能填被注册号自己的码。`
+    : '池内暂无可用邀请码，先加一个账号。';
+  return INV_CODES;
+}
+$('#btnInviteCodes').onclick = e => run(e.currentTarget, loadInviteCodes);
+
+$('#btnBind').onclick = e => run(e.currentTarget, async () => {
+  const phone = $('#bindPhone').value, code = $('#bindCode').value.trim();
+  if (!code) return toast('邀请码不能为空', 'err');
+  const r = await api('/api/invite/bind', {
+    method: 'POST', body: JSON.stringify({ phone, invite_code: code })
+  });
+  showOut($('#bindOut'), r, !r.ok);
+  toast(r.ok ? '绑定成功' : r.error, r.ok ? 'ok' : 'err');
+  if (r.ok) { loadInviteCodes(); loadOverview(); }
 });
 
 /* ---------- models ---------- */
