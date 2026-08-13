@@ -24,7 +24,24 @@ DEFAULT_EXITS: dict[int, str] = {
     60001: "US-s1", 60002: "US-s2", 60003: "US-s3", 60004: "US-s4",
 }
 
-PROBE_TTL = 900.0   # 探活结果缓存 15 分钟
+PROBE_TTL = 900.0     # 探活结果缓存 15 分钟
+BAD_COOLDOWN = 600.0  # 出口 CONNECT 失败后拉黑 10 分钟
+
+# gost 端口在监听 ≠ 上游 resin 节点还活着。节点掉线后 gost 会对 CONNECT
+# 直接回 503，httpx 抛 ProxyError("503 Service Unavailable")。
+# 这类错误属于链路故障，必须换出口重试，不能记成账号错误。
+_PROXY_ERR_HINTS = (
+    "503 service unavailable", "502 bad gateway", "504 gateway",
+    "proxyerror", "connect tunnel failed", "unable to connect to proxy",
+    "connection refused", "all attempts to connect to proxy",
+    "cannot connect to proxy",
+)
+
+
+def is_proxy_error(msg: object) -> bool:
+    """判断一个错误串是否为出口链路故障（而非账号/业务错误）"""
+    low = str(msg or "").lower()
+    return any(h in low for h in _PROXY_ERR_HINTS)
 
 
 class ProxyManager:
@@ -47,6 +64,9 @@ class ProxyManager:
         self._probe: dict[int, dict[str, Any]] = {}
         self._probed_at = 0.0
         self._rr = 0
+        # 后台重探单线程守卫：pick() 每次调用都可能发现 TTL 过期，
+        # 没有这个标志会 spawn 一堆并发探活线程（每个再开 8 个 worker）
+        self._probing = False
         self._load_state()
 
     # ---------- state ----------
@@ -119,6 +139,22 @@ class ProxyManager:
         with self._lock:
             return [p for p, r in sorted(self._probe.items()) if r.get("ok")]
 
+    def mark_bad(self, proxy_url: str) -> None:
+        """出口 CONNECT 失败时主动拉黑，10 分钟后自动解禁。"""
+        if not proxy_url:
+            return
+        # 从 URL 里提取端口
+        try:
+            port = int(proxy_url.rstrip("/").rsplit(":", 1)[-1])
+        except (ValueError, IndexError):
+            return
+        with self._lock:
+            if port in self._probe:
+                self._probe[port]["ok"] = False
+                self._probe[port]["bad_until"] = time.time() + BAD_COOLDOWN
+                self._probe[port]["detail"] = "proxy CONNECT 503 (auto-banned)"
+        self._save_state()
+
     # ---------- 主接口 ----------
     def pick(self) -> str | None:
         """返回本次请求应使用的代理 URL（None = 直连）"""
@@ -126,7 +162,26 @@ class ProxyManager:
             return None
         if self.mode == "fixed":
             return self.fixed_url or None
-        # rotate
+        # rotate: 先解禁已过冷却期的出口，再考虑 TTL 重探
+        with self._lock:
+            now = time.time()
+            for p, r in self._probe.items():
+                if not r.get("ok") and r.get("bad_until", 0) < now:
+                    # 冷却到期：重置为"待探活"，让下次 probe_all 重判
+                    r.pop("bad_until", None)
+            stale = (now - self._probed_at) > PROBE_TTL
+            # 后台重探守卫：已在探就不再 spawn
+            should_probe = stale and not self._probing
+            if should_probe:
+                self._probing = True
+        if should_probe:
+            def _bg_probe():
+                try:
+                    self.probe_all(force=True)
+                finally:
+                    with self._lock:
+                        self._probing = False
+            threading.Thread(target=_bg_probe, daemon=True).start()
         ports = self.usable_ports()
         if not ports:
             if (time.time() - self._probed_at) > 60:

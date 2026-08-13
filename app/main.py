@@ -28,7 +28,7 @@ from . import upstream
 from . import invite as invite_mod
 from .accounting import Ledger
 from .pool import Account, AccountPool
-from .proxies import DEFAULT_EXITS, ProxyManager
+from .proxies import DEFAULT_EXITS, ProxyManager, is_proxy_error
 from .register import Registrar
 
 # --------------------------------------------------------------------------- #
@@ -55,6 +55,8 @@ ledger = Ledger(DATA_DIR / "ledger.json")
 pm = ProxyManager(mode=PROXY_MODE, host=PROXY_HOST, fixed_url=PROXY_FIXED,
                   exits=DEFAULT_EXITS, state_file=PROXY_STATE)
 registrar = Registrar(pool, pm)
+# 出口故障时账号池要能自己换线重试
+pool.proxy_mgr = pm
 scheduler = BackgroundScheduler(timezone="Asia/Shanghai")
 
 app = FastAPI(title="wb-pool", version="1.0.0", docs_url="/api/docs", redoc_url=None)
@@ -184,12 +186,11 @@ async def chat_completions(request: Request) -> Any:
         except upstream.UpstreamError as exc:
             last_err = f"{exc.code}: {exc.msg}"
             if force_key:
-                # 指定账号调试：直接透传上游错误，不改账号状态
                 raise HTTPException(502, {"error": {"message": last_err,
                                                     "code": exc.code,
                                                     "type": "upstream_error"}})
             pool.release(acc, error=last_err)
-            if exc.code == 11102:      # 模型不存在，换号也没用
+            if exc.code == 11102:
                 raise HTTPException(400, {"error": {"message": exc.msg, "code": exc.code,
                                                     "type": "invalid_request_error"}})
             continue
@@ -203,6 +204,10 @@ async def chat_completions(request: Request) -> Any:
             last_err = str(exc)[:200]
             if force_key:
                 raise HTTPException(502, {"error": {"message": last_err, "type": "upstream_error"}})
+            # 代理链路故障：拉黑该出口，换出口重试，不污染账号 last_error
+            if is_proxy_error(last_err):
+                pm.mark_bad(proxy)
+                continue
             pool.release(acc, error=last_err)
             continue
 
@@ -335,8 +340,12 @@ async def anthropic_messages(request: Request) -> Any:
         raise HTTPException(exc.status if exc.status >= 400 else 502,
                             {"type": "error", "error": {"type": "api_error", "message": exc.msg}})
     except Exception as exc:  # noqa: BLE001
-        pool.release(acc, error=str(exc)[:200])
-        raise HTTPException(502, f"上游失败: {exc}"[:200])
+        err = str(exc)[:200]
+        if is_proxy_error(err):
+            pm.mark_bad(proxy)
+        else:
+            pool.release(acc, error=err)
+        raise HTTPException(502, f"上游失败: {err}")
 
     if want_stream:
         def a_stream() -> Iterator[str]:

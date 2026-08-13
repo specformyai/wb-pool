@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any
 
 from . import upstream
+from .proxies import is_proxy_error
 
 QUOTA_KEYWORDS = ("quota", "insufficient", "余额", "积分不足", "配额", "exceeded",
                   "资源包", "11003", "11004", "arrears")
@@ -74,6 +75,8 @@ class AccountPool:
         # rotation_mode: "lru" = 轮询（负载均衡），"drain" = 优先耗尽当前账号
         self._state_file = self.path.parent / "pool_state.json"
         self.rotation_mode: str = "lru"
+        # 由 main.py 注入的 ProxyManager，用于出口故障时换线重试
+        self.proxy_mgr: Any = None
         self._load_state()
         self.load()
 
@@ -290,6 +293,13 @@ class AccountPool:
             if not acc.access_token:
                 continue
             bal = upstream.get_balance(acc.access_token, proxy=proxy, retries=2)
+            # 代理链路故障：拉黑该出口换一个再试，不污染账号 last_error
+            if bal.get("total", -1) < 0 and is_proxy_error(bal.get("error")) \
+                    and self.proxy_mgr:
+                if proxy:
+                    self.proxy_mgr.mark_bad(proxy)
+                proxy = self.proxy_mgr.pick()
+                bal = upstream.get_balance(acc.access_token, proxy=proxy, retries=2)
             with self._lock:
                 if bal.get("total", -1) >= 0:
                     acc.credits_total = bal["total"]
@@ -301,7 +311,7 @@ class AccountPool:
                     # 账号真实注册时间，本地 add/import 时写的是登录时间，要被覆盖
                     if bal.get("registered_at"):
                         acc.registered_at = bal["registered_at"]
-                else:
+                elif not is_proxy_error(bal.get("error")):
                     acc.last_error = f"balance: {bal.get('error', 'unknown')}"[:300]
             out.append({"phone": acc.phone, "masked": acc.masked(),
                         "total": bal.get("total"), "packages": bal.get("packages", []),
@@ -324,13 +334,19 @@ class AccountPool:
             return {"ok": False, "skipped": True, "masked": acc.masked(),
                     "error": "今天已签到"}
         res = upstream.daily_checkin(acc.access_token, proxy=proxy)
+        # 代理链路故障：拉黑该出口换一个再试一次，不污染账号 last_error
+        if not res.get("ok") and not res.get("already") and \
+                is_proxy_error(res.get("error")) and self.proxy_mgr:
+            if proxy:
+                self.proxy_mgr.mark_bad(proxy)
+            proxy = self.proxy_mgr.pick()
+            res = upstream.daily_checkin(acc.access_token, proxy=proxy)
         with self._lock:
             if res.get("ok") or res.get("already"):
-                # already = 上游说今天已签到，同样要落 last_checkin，
-                # 否则每次点都会白打一次上游、UI 也一直显示"—"
+                # already = 上游说今天已签到，同样要落 last_checkin
                 acc.last_checkin = today
                 acc.last_error = ""
-            else:
+            elif not is_proxy_error(res.get("error")):
                 acc.last_error = f"checkin: {res.get('error')}"[:300]
         self.save()
         # 签到成功后余额会变，只刷这一个账号
@@ -355,13 +371,22 @@ class AccountPool:
                 out.append({"phone": acc.phone, "masked": acc.masked(),
                             "skipped": True, "reason": "already checked in today"})
                 continue
-            res = upstream.daily_checkin(acc.access_token, proxy=proxy)
+            cur_proxy = proxy
+            res = upstream.daily_checkin(acc.access_token, proxy=cur_proxy)
+            # 代理链路故障：拉黑该出口换一个再试一次，不污染账号 last_error
+            if not res.get("ok") and not res.get("already") and \
+                    is_proxy_error(res.get("error")) and self.proxy_mgr:
+                if cur_proxy:
+                    self.proxy_mgr.mark_bad(cur_proxy)
+                cur_proxy = self.proxy_mgr.pick()
+                res = upstream.daily_checkin(acc.access_token, proxy=cur_proxy)
             with self._lock:
                 if res.get("ok") or res.get("already"):
                     acc.last_checkin = today
                     if res.get("already"):
                         acc.last_error = ""
-                else:
+                elif not is_proxy_error(res.get("error")):
+                    # 只有非链路错误才写进账号 last_error
                     acc.last_error = f"checkin: {res.get('error')}"[:300]
             out.append({"phone": acc.phone, "masked": acc.masked(), **res})
         self.save()
