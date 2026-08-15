@@ -223,11 +223,32 @@ td.err-cell{max-width:220px;font-size:11.5px;color:#ffa8b2;overflow:hidden;
 .model-card.ok::before{opacity:1}
 .model-name{font-family:"JetBrains Mono",monospace;font-size:13.5px;font-weight:500;
   word-break:break-all;margin-bottom:7px}
-.model-tags{display:flex;gap:5px;flex-wrap:wrap;margin-top:9px}
+.model-tags{display:flex;gap:5px;flex-wrap:wrap;margin-top:9px;min-height:47px;align-content:flex-start}
 .tag{padding:3px 8px;border-radius:6px;background:var(--surface2);font-size:10.5px;
   color:var(--txt2);letter-spacing:.2px}
 .tag.tier{color:var(--acc);background:rgba(109,124,255,.13)}
 .model-why{font-size:11px;color:var(--txt3);margin-top:7px;line-height:1.5}
+.model-alias{font-size:11.5px;color:var(--txt3);margin-top:-3px}
+.model-def{position:absolute;top:11px;right:11px;padding:2px 7px;border-radius:5px;
+  font-size:9.5px;letter-spacing:.4px;color:var(--ok);background:rgba(46,230,168,.13);
+  border:1px solid rgba(46,230,168,.25)}
+.tag.rate{color:var(--warn);background:rgba(255,184,77,.12);
+  font-family:"JetBrains Mono",monospace}
+.model-caps{display:flex;gap:9px;flex-wrap:wrap;margin-top:10px}
+.cap{display:inline-flex;align-items:center;gap:4px;font-size:10.5px;color:var(--txt2)}
+.cap svg{width:12px;height:12px;stroke-width:2.1;opacity:.8}
+.model-desc{font-size:11px;color:var(--txt2);margin-top:10px;line-height:1.55;
+  padding-top:9px;border-top:1px solid var(--line);display:-webkit-box;
+  -webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;min-height:44px}
+.model-state{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin:0 0 15px}
+.model-state:empty{display:none}
+.ms-pill,.ms-item{display:inline-flex;align-items:center;gap:5px;padding:5px 10px;
+  border-radius:8px;font-size:11.5px;background:var(--surface2);color:var(--txt2);
+  border:1px solid var(--line)}
+.ms-pill.console_api{color:var(--ok);border-color:rgba(46,230,168,.25);background:rgba(46,230,168,.09)}
+.ms-pill.static{color:var(--warn);border-color:rgba(255,184,77,.25);background:rgba(255,184,77,.09)}
+.ms-item.err{color:var(--err);border-color:rgba(255,93,110,.28);background:rgba(255,93,110,.09)}
+.ms-pill svg,.ms-item svg{width:13px;height:13px;stroke-width:2.1}
 
 /* 代理网格 */
 .mode-row{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-bottom:17px;

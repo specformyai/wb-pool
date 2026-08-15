@@ -32,6 +32,9 @@ from .pool import Account, AccountPool
 from .proxies import DEFAULT_EXITS, ProxyManager, is_proxy_error
 from .register import Registrar
 from .auto_register import AutoRegistrar
+from .upstream_sync import (STATIC_MODELS, is_cache_expired, in_fail_cooldown,
+                            load_models_cache as load_sync_cache, resolve_models,
+                            sync_models_from_upstream, to_openai_data, vendor_of)
 
 # --------------------------------------------------------------------------- #
 # 配置
@@ -94,40 +97,37 @@ def require_admin(authorization: str | None = Header(None),
 # --------------------------------------------------------------------------- #
 # 模型缓存
 # --------------------------------------------------------------------------- #
-def load_models_cache() -> dict[str, Any]:
-    if MODELS_CACHE.exists():
-        try:
-            return json.loads(MODELS_CACHE.read_text())
-        except Exception:  # noqa: BLE001
-            pass
-    return {"models": [], "probed_at": 0, "details": []}
-
-
-def save_models_cache(d: dict[str, Any]) -> None:
-    tmp = MODELS_CACHE.with_suffix(".tmp")
-    tmp.write_text(json.dumps(d, ensure_ascii=False, indent=2))
-    tmp.replace(MODELS_CACHE)
-
-
 def probe_models(force: bool = False) -> dict[str, Any]:
-    cache = load_models_cache()
-    if cache["models"] and not force and (time.time() - cache.get("probed_at", 0)) < 3600:
-        return cache
+    """
+    取模型清单。参照 workbuddy2api(Go) 的 fetchDynamicModels：
+      正缓存 1h -> 失败 5min 负缓存 -> 静态兜底，绝不逐个 chat 探测（会 11140 且烧积分）。
+    """
+    cache = load_sync_cache(MODELS_CACHE)
+    if not force and cache["models"] and not is_cache_expired(MODELS_CACHE):
+        return {"models": cache["models"], "source": cache.get("source") or "cache",
+                "probed_at": cache.get("timestamp"), "error": None}
+    if not force and in_fail_cooldown(cache):
+        models, source = resolve_models(MODELS_CACHE)
+        return {"models": models, "source": source, "probed_at": cache.get("timestamp"),
+                "error": f"上游拉取失败冷却中: {cache.get('last_error')}"}
+
     acc = pool.acquire(proxy=pm.pick())
     if not acc:
-        return cache | {"error": "池中无可用账号"}
-    import concurrent.futures as cf
-    proxy = pm.pick()
-    details: list[dict[str, Any]] = []
-    with cf.ThreadPoolExecutor(4) as ex:
-        futs = [ex.submit(upstream.probe_model, acc.access_token, m, proxy)
-                for m in upstream.MODEL_CANDIDATES]
-        for f in futs:
-            details.append(f.result())
-    ok = [d["model"] for d in details if d.get("available")]
-    out = {"models": ok, "details": details, "probed_at": time.time()}
-    save_models_cache(out)
-    return out
+        models, source = resolve_models(MODELS_CACHE)
+        return {"models": models, "source": source,
+                "probed_at": cache.get("timestamp"), "error": "池中无可用账号"}
+    try:
+        res = sync_models_from_upstream(token=acc.access_token, proxy=pm.pick(),
+                                       cache_path=MODELS_CACHE)
+    finally:
+        pool.release(acc)
+
+    if res.get("ok"):
+        return {"models": res["models"], "source": "console_api",
+                "probed_at": res.get("timestamp"), "error": None}
+    models, source = resolve_models(MODELS_CACHE)
+    return {"models": models, "source": source,
+            "probed_at": cache.get("timestamp"), "error": res.get("error")}
 
 
 # --------------------------------------------------------------------------- #
@@ -135,17 +135,9 @@ def probe_models(force: bool = False) -> dict[str, Any]:
 # --------------------------------------------------------------------------- #
 @app.get("/v1/models", dependencies=[Depends(require_api)])
 def list_models() -> dict[str, Any]:
-    cache = load_models_cache()
-    models = cache.get("models") or [m for m in upstream.MODEL_META]
-    now = int(time.time())
-    return {
-        "object": "list",
-        "data": [{
-            "id": m, "object": "model", "created": now, "owned_by":
-                upstream.MODEL_META.get(m, {}).get("vendor", "codebuddy"),
-            "meta": upstream.MODEL_META.get(m, {}),
-        } for m in models],
-    }
+    """OpenAI 兼容模型列表：缓存 -> 静态兜底，永不返回空数组。"""
+    models, _source = resolve_models(MODELS_CACHE)
+    return {"object": "list", "data": to_openai_data(models)}
 
 
 def _sse(obj: Any) -> str:
@@ -435,6 +427,21 @@ def get_pool() -> dict[str, Any]:
     return {"stats": pool.stats(), "accounts": accs}
 
 
+
+@app.get("/api/admin/accounts", dependencies=[Depends(require_admin)])
+def get_accounts() -> dict[str, Any]:
+    accs = []
+    for a in pool.all():
+        accs.append({
+            "phone": a.phone,
+            "masked": a.masked(),
+            "credits_total": a.credits_total,
+            "credits_spent": a.credits_spent,
+            "registered_at": a.registered_at,
+            "status": a.status,
+        })
+    return {"accounts": accs}
+
 @app.post("/api/pool/refresh_balance", dependencies=[Depends(require_admin)])
 def api_refresh_balance() -> dict[str, Any]:
     return {"ok": True, "results": pool.refresh_balances(proxy=pm.pick())}
@@ -548,7 +555,13 @@ async def api_auto_reg_start(request: Request) -> dict[str, Any]:
     return auto_registrar.start(
         invite_code=b.get("invite_code", ""),
         label=b.get("label", ""),
+        count=b.get("count", 1),
     )
+
+
+@app.post("/api/auto_register/stop/{task_id}", dependencies=[Depends(require_admin)])
+def api_auto_reg_stop(task_id: str) -> dict[str, Any]:
+    return auto_registrar.stop(task_id)
 
 
 @app.get("/api/auto_register/status/{task_id}", dependencies=[Depends(require_admin)])
@@ -576,8 +589,10 @@ def api_uoomsg_balance() -> dict[str, Any]:
 @app.get("/api/models", dependencies=[Depends(require_admin)])
 def api_models(force: bool = False) -> dict[str, Any]:
     c = probe_models(force=force)
-    return {"models": c.get("models", []), "details": c.get("details", []),
-            "probed_at": c.get("probed_at"), "meta": upstream.MODEL_META,
+    models = c.get("models") or []
+    return {"models": [m["id"] for m in models], "details": models,
+            "meta": {m["id"]: m for m in models},
+            "source": c.get("source"), "probed_at": c.get("probed_at"),
             "error": c.get("error")}
 
 
@@ -589,7 +604,8 @@ def api_rates() -> dict[str, Any]:
     本表按 model 累计 credit 与 tokens 算出，样本越多越准。
     """
     t = ledger.table()
-    t["meta"] = upstream.MODEL_META
+    models, _ = resolve_models(MODELS_CACHE)
+    t["meta"] = {m["id"]: m for m in models}
     return t
 
 
@@ -603,7 +619,7 @@ async def api_measure_rates(request: Request) -> dict[str, Any]:
         b = await request.json()
     except Exception:  # noqa: BLE001
         b = {}
-    models = b.get("models") or load_models_cache().get("models") or []
+    models = b.get("models") or [m["id"] for m in resolve_models(MODELS_CACHE)[0]]
     prompt = b.get("prompt") or "请用中文写一段约120字的短文，介绍春天。"
 
     acc = _pick_account()
@@ -742,8 +758,32 @@ def _job_balance() -> None:
         pass
 
 
+def _job_sync_models() -> None:
+    try:
+        r = probe_models(force=True)
+        print(f"[cron] 模型清单刷新 source={r.get('source')} "
+              f"count={len(r.get('models') or [])} error={r.get('error')}")
+    except Exception as exc:  # noqa: BLE001
+        print(f"[cron] 模型清单刷新失败: {exc}")
+
+
 @app.on_event("startup")
 def _startup() -> None:
+    # 模型清单：缓存过期则拉一次官方 console 接口（失败自动落静态兜底）
+    if is_cache_expired(MODELS_CACHE):
+        r = probe_models(force=True)
+        print(f"[startup] 模型清单 source={r.get('source')} "
+              f"count={len(r.get('models') or [])} error={r.get('error')}")
+    else:
+        c = load_sync_cache(MODELS_CACHE)
+        print(f"[startup] 模型缓存有效，{c.get('available_count')} 个模型，"
+              f"synced_at={c.get('synced_at')}")
+
+    # 每 6h 自动刷新一次模型清单
+    scheduler.add_job(_job_sync_models, "interval", hours=6,
+                      id="sync_models", name="模型清单刷新", replace_existing=True)
+    
+    # 添加定时任务
     try:
         mi, h, d, mo, dow = CHECKIN_CRON.split()
         scheduler.add_job(_job_checkin, CronTrigger(minute=mi, hour=h, day=d, month=mo,
@@ -771,9 +811,84 @@ def api_scheduler() -> dict[str, Any]:
                      for j in scheduler.get_jobs()]}
 
 
+# ---- 模型同步 ----
+@app.post("/api/admin/sync-models", dependencies=[Depends(require_admin)])
+async def api_sync_models(request: Request) -> dict[str, Any]:
+    """从上游同步模型列表，更新 models_cache.json"""
+    try:
+        body = await request.json()
+    except Exception:  # noqa: BLE001
+        body = {}
+    
+    r = probe_models(force=True)
+    models = r.get("models") or []
+    return {"ok": r.get("error") is None, "source": r.get("source"),
+            "available_count": len(models),
+            "models": [m["id"] for m in models],
+            "details": models, "error": r.get("error")}
+
+
+@app.get("/api/admin/models-cache-status", dependencies=[Depends(require_admin)])
+def api_models_cache_status() -> dict[str, Any]:
+    """检查模型缓存状态"""
+    if not MODELS_CACHE.exists():
+        return {
+            "exists": False,
+            "expired": True,
+            "source": "static",
+            "available_count": len(STATIC_MODELS),
+            "static_fallback_count": len(STATIC_MODELS),
+            "message": "缓存不存在，/v1/models 走静态兜底表，可点同步",
+        }
+    
+    try:
+        data = load_sync_cache(MODELS_CACHE)
+        return {
+            "exists": True,
+            "expired": is_cache_expired(MODELS_CACHE),
+            "synced_at": data.get("synced_at"),
+            "source": data.get("source"),
+            "available_count": data.get("available_count", 0),
+            "age_hours": round((time.time() - data.get("timestamp", 0)) / 3600, 1),
+            "last_error": data.get("last_error"),
+            "in_fail_cooldown": in_fail_cooldown(data),
+            "static_fallback_count": len(STATIC_MODELS),
+        }
+    except Exception as e:
+        return {
+            "exists": True,
+            "expired": True,
+            "error": str(e),
+            "message": "缓存损坏，需要重新同步",
+        }
+
+
 # --------------------------------------------------------------------------- #
 # WebUI
 # --------------------------------------------------------------------------- #
+
+# --------------------------------------------------------------------------- #
+# Admin API - 账号管理
+# --------------------------------------------------------------------------- #
+@app.get("/api/admin/accounts", dependencies=[Depends(require_admin)])
+def api_get_accounts() -> dict[str, Any]:
+    """获取所有账号信息（含积分、注册时间）"""
+    accounts_data = []
+    for acc in pool._accounts:
+        accounts_data.append({
+            "phone": acc.phone,
+            "points": acc.credits_total,
+            "status": acc.status,
+            "registered_at": acc.registered_at.isoformat() if acc.registered_at else None,
+            "expires_at": acc.expires_at.isoformat() if acc.expires_at else None,
+            "last_checkin": acc.last_checkin.isoformat() if acc.last_checkin else None,
+        })
+    
+    return {
+        "total": len(accounts_data),
+        "accounts": accounts_data,
+    }
+
 STATIC_DIR = BASE_DIR / "web"
 if STATIC_DIR.exists():
     app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")

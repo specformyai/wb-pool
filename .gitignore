@@ -8,3 +8,24 @@ jscache/
 probe*.py
 models_ok.json
 rates.json
+
+# agent 一次性诊断/改造脚本（本地临时，不入库）
+patch_*.py
+fix_*.py
+inspect_*.py
+diag_*.py
+check_*.py
+dump_*.py
+drop_*.py
+batch_probe.py
+find_full_phone.py
+list_all_accounts.py
+pool_analysis.py
+/test_upstream_sync.py
+/main.py
+/upstream.py
+/upstream_sync.py
+/uoomsg.py
+/app.js
+/index.html
+*.tar.gz

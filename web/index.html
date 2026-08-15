@@ -228,10 +228,11 @@
       <h2><i data-lucide="boxes"></i>可用模型</h2>
       <div class="head-actions">
         <button class="btn ghost" id="btnModels"><i data-lucide="refresh-cw"></i>读取缓存</button>
-        <button class="btn primary" id="btnModelsProbe"><i data-lucide="radar"></i>重新探测</button>
+        <button class="btn primary" id="btnModelsProbe"><i data-lucide="cloud-download"></i>同步上游</button>
       </div>
     </div>
-    <p class="hint">上游没有模型列表接口（所有 models 路径实测 404），这里靠候选名单并发探测：返回 200 即可用，400/11102 即不存在。</p>
+    <p class="hint">直接读官方 console 模型接口（<code>/console/enterprises/personal/models</code> 的 CLI agent 白名单），拿到的就是账号真实可用的模型与积分倍率。缓存 1 小时，失败 5 分钟内不重试并回落静态表，每 6 小时自动刷新。</p>
+    <div id="modelState" class="model-state"></div>
     <div id="modelGrid" class="model-grid"></div>
   </div>
 

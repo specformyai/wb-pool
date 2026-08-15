@@ -66,7 +66,7 @@ MODEL_CANDIDATES = [
     "kimi-k3", "kimi-k2.6", "kimi-k2.5",
     "deepseek-v4-pro", "deepseek-v4-flash", "deepseek-v3", "deepseek-v3-2-volc", "deepseek-r1",
     "hunyuan-2.0-instruct",
-    "glm-5.2", "glm-5.1", "glm-5.0",
+    "glm-5.3", "glm-5.2", "glm-5.1", "glm-5.0",
     "minimax-m2.7",
     "default", "auto",
     # 以下历史上出现过/可能开放，保留探测
@@ -87,6 +87,7 @@ MODEL_META: dict[str, dict[str, Any]] = {
     "deepseek-v3-2-volc":   {"vendor": "DeepSeek",  "tier": "standard", "ctx": 128000},
     "deepseek-r1":          {"vendor": "DeepSeek",  "tier": "reasoning","ctx": 64000},
     "hunyuan-2.0-instruct": {"vendor": "Tencent",   "tier": "standard", "ctx": 32000},
+    "glm-5.3":              {"vendor": "Zhipu",     "tier": "flagship", "ctx": 200000},
     "glm-5.2":              {"vendor": "Zhipu",     "tier": "flagship", "ctx": 200000},
     "glm-5.1":              {"vendor": "Zhipu",     "tier": "standard", "ctx": 200000},
     "glm-5.0":              {"vendor": "Zhipu",     "tier": "standard", "ctx": 128000},
@@ -345,3 +346,68 @@ def extract_sms_code(sms: str, phone: str = "") -> str | None:
         if m:
             return m.group(1)
     return None
+
+
+def fetch_official_models(token: str, proxy: str | None = None,
+                          timeout: float = 30.0) -> dict[str, Any]:
+    """
+    从官方 console 接口获取本账号真实可用的模型列表。
+
+    实测（2026-08-15，10/10 账号 HTTP 200）：
+      GET {COPILOT}/console/enterprises/personal/models
+      -> {"code":0,"data":{"models":[...23 项...],"agents":[...13 项...],"endpoint":...}}
+
+    坑：
+      - agents 每项用 **name** 标识（没有 key 字段），CLI 那项是 name=="cli"
+      - data.models 是全量表（23 个），要用 agents["cli"].models 这 11 个 id 过滤
+      - 倍率在 credits 字段里，形如 "x0.79 credits"
+    返回 {"models": [...], "error": None}
+    """
+    try:
+        with httpx.Client(proxy=proxy, timeout=timeout, follow_redirects=True) as c:
+            r = c.get(f"{COPILOT}/console/enterprises/personal/models",
+                      headers=auth_headers(token) | {
+                          "Accept": "application/json",
+                          "Origin": CONSOLE,
+                          "Referer": f"{CONSOLE}/",
+                      })
+        if r.status_code != 200:
+            return {"models": [], "error": f"HTTP {r.status_code}: {r.text[:200]}"}
+        payload = r.json()
+    except Exception as exc:  # noqa: BLE001
+        return {"models": [], "error": f"{type(exc).__name__}: {exc}"[:200]}
+
+    if payload.get("code") != 0:
+        return {"models": [], "error": f"code={payload.get('code')} {str(payload.get('msg'))[:120]}"}
+
+    data = payload.get("data") or {}
+    cli_ids: list[str] = []
+    for ag in data.get("agents") or []:
+        if ag.get("name") == "cli":
+            cli_ids = list(ag.get("models") or [])
+            break
+    if not cli_ids:
+        return {"models": [], "error": "agents 里没有 cli 项"}
+
+    by_id = {m.get("id"): m for m in (data.get("models") or []) if m.get("id")}
+    out: list[dict[str, Any]] = []
+    for mid in cli_ids:
+        m = by_id.get(mid)
+        if not m or m.get("disabled"):
+            continue
+        out.append({
+            "id": mid,
+            "name": m.get("name") or mid,
+            "vendor": m.get("vendor") or "codebuddy",
+            "ctx": m.get("maxInputTokens") or 128000,
+            "max_output_tokens": m.get("maxOutputTokens") or 4096,
+            "credits": m.get("credits"),
+            "desc": m.get("descriptionZh") or m.get("descriptionEn"),
+            "supports_images": bool(m.get("supportsImages")),
+            "supports_tool_call": bool(m.get("supportsToolCall")),
+            "supports_reasoning": bool(m.get("supportsReasoning")),
+            "is_default": bool(m.get("isDefault")),
+        })
+    if not out:
+        return {"models": [], "error": "cli 模型全部 disabled"}
+    return {"models": out, "error": None}

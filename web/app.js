@@ -370,30 +370,54 @@ $('#btnBind').onclick = e => run(e.currentTarget, async () => {
 });
 
 /* ---------- models ---------- */
+const SRC_LABEL = { console_api: '官方接口', cache: '本地缓存', static: '静态兜底' };
+const fmtCtx = n => !n ? '' : (n >= 1e6 ? (n / 1e6) + 'M' : Math.round(n / 1000) + 'K');
+
 async function loadModels(force) {
   const d = await api('/api/models' + (force ? '?force=true' : '')).catch(e => { toast(e.message, 'err'); return null; });
   if (!d) return;
   MODELS = d.models || [];
-  const meta = d.meta || {};
-  const det = d.details || [];
-  const rows = det.length ? det : MODELS.map(m => ({ model: m, available: true }));
-  $('#modelGrid').innerHTML = rows.map(x => {
-    const m = meta[x.model] || {};
-    return `<div class="model-card ${x.available ? 'ok' : 'no'}">
-      <div class="model-name">${x.model}</div>
+  const rows = d.details || [];
+
+  const src = d.source || 'cache';
+  const when = d.probed_at ? new Date(d.probed_at * 1000).toLocaleString('zh-CN', { hour12: false }) : '—';
+  $('#modelState').innerHTML =
+    `<span class="ms-pill ${src}"><i data-lucide="${src === 'console_api' ? 'cloud-download' : src === 'static' ? 'hard-drive' : 'database'}"></i>${SRC_LABEL[src] || src}</span>` +
+    `<span class="ms-item"><i data-lucide="boxes"></i>${MODELS.length} 个模型</span>` +
+    `<span class="ms-item"><i data-lucide="clock"></i>${when}</span>` +
+    (d.error ? `<span class="ms-item err"><i data-lucide="triangle-alert"></i>${d.error}</span>` : '');
+
+  $('#modelGrid').innerHTML = rows.length ? rows.map(x => {
+    const caps = [
+      x.supports_reasoning ? ['brain', '推理'] : null,
+      x.supports_images ? ['image', '图像'] : null,
+      x.supports_tool_call ? ['wrench', '工具'] : null,
+    ].filter(Boolean);
+    const mult = (x.credits || '').replace(/\s*credits?$/i, '');
+    return `<div class="model-card ok">
+      ${x.is_default ? '<span class="model-def">默认</span>' : ''}
+      <div class="model-name">${x.id}</div>
+      <div class="model-alias">${x.name || x.id}</div>
       <div class="model-tags">
-        ${m.vendor ? `<span class="tag">${m.vendor}</span>` : ''}
-        ${m.tier ? `<span class="tag tier">${m.tier}</span>` : ''}
-        ${m.ctx ? `<span class="tag">${(m.ctx / 1000) | 0}K ctx</span>` : ''}
+        <span class="tag tier">${x.vendor_label || 'codebuddy'}</span>
+        ${x.ctx ? `<span class="tag">${fmtCtx(x.ctx)} ctx</span>` : ''}
+        ${x.max_output_tokens ? `<span class="tag">${fmtCtx(x.max_output_tokens)} out</span>` : ''}
+        ${mult ? `<span class="tag rate">${mult}</span>` : ''}
       </div>
-      ${x.available ? '' : `<div class="model-why">${x.reason || '不可用'}</div>`}
+      ${caps.length ? `<div class="model-caps">${caps.map(([ic, t]) =>
+        `<span class="cap"><i data-lucide="${ic}"></i>${t}</span>`).join('')}</div>` : ''}
+      ${x.desc ? `<div class="model-desc" title="${x.desc.replace(/"/g, '&quot;')}">${x.desc}</div>` : ''}
     </div>`;
-  }).join('');
+  }).join('') : '<div class="chat-empty">没有模型数据，点「同步上游」</div>';
   icons();
+
   const sel = $('#chatModel');
-  sel.innerHTML = MODELS.map(m => `<option>${m}</option>`).join('');
+  sel.innerHTML = rows.length
+    ? rows.map(x => `<option value="${x.id}"${x.is_default ? ' selected' : ''}>${x.id}</option>`).join('')
+    : MODELS.map(m => `<option>${m}</option>`).join('');
+
   if (d.error) toast(d.error, 'err');
-  else if (force) toast(`探测完成，${MODELS.length} 个可用`, 'ok');
+  else if (force) toast(`已从${SRC_LABEL[src] || src}同步 ${MODELS.length} 个模型`, 'ok');
 }
 $('#btnModels').onclick = e => run(e.currentTarget, () => loadModels(false));
 $('#btnModelsProbe').onclick = e => run(e.currentTarget, () => loadModels(true));
@@ -416,7 +440,7 @@ function renderRates(d) {
     const m = meta[x.model] || {};
     const hi = x.model === d.base_model ? ' style="color:var(--ok)"' : '';
     return `<tr><td style="font-family:'JetBrains Mono',monospace">${x.model}</td>
-      <td>${m.vendor || '—'}</td>
+      <td>${m.vendor_label || m.vendor || '—'}</td>
       <td class="num">${x.credits ?? '—'}</td>
       <td class="num">${(x.total_tokens ?? 0).toLocaleString()}</td>
       <td class="num">${x.credits_per_1k ?? '—'}</td>
