@@ -1149,7 +1149,7 @@ def _asset_ver() -> str:
     发版后第一次请求必然 miss，不用叫用户清缓存。
     """
     ts = 0.0
-    for name in ("app.css", "app.js"):
+    for name in ("app.css", "app.js", "favicon.png"):
         f = STATIC_DIR / name
         if f.exists():
             ts = max(ts, f.stat().st_mtime)
@@ -1163,6 +1163,7 @@ def index() -> HTMLResponse:
         html = f.read_text(encoding="utf-8")
         v = _asset_ver()
         html = (html.replace("/static/app.css", f"/static/app.css?v={v}")
-                    .replace("/static/app.js", f"/static/app.js?v={v}"))
+                    .replace("/static/app.js", f"/static/app.js?v={v}")
+                    .replace("/static/favicon.png", f"/static/favicon.png?v={v}"))
         return HTMLResponse(html, headers={"Cache-Control": "no-store"})
     return HTMLResponse("<h1>wb-pool</h1><p>WebUI 未安装</p>")
