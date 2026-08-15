@@ -14,6 +14,36 @@
 <div class="glow glow-a"></div>
 <div class="glow glow-b"></div>
 
+<!-- ══════════════ 登录闸门 ══════════════ -->
+<div class="gate" id="gate" hidden>
+  <div class="gate-panel">
+    <div class="gate-mark"><i data-lucide="layers"></i></div>
+    <h1 class="gate-title">wb<em>pool</em></h1>
+    <p class="gate-sub">WorkBuddy 账号池控制台</p>
+    <form class="gate-form" id="gateForm" autocomplete="on">
+      <label class="gate-field">
+        <i data-lucide="user-round"></i>
+        <input id="loginUser" name="username" placeholder="用户名" aria-label="用户名"
+               autocomplete="username" autocapitalize="off" spellcheck="false" required>
+      </label>
+      <label class="gate-field">
+        <i data-lucide="lock"></i>
+        <input id="loginPass" name="password" type="password" placeholder="密码" aria-label="密码"
+               autocomplete="current-password" required>
+        <button type="button" class="gate-eye" id="loginEye" aria-label="显示密码">
+          <i data-lucide="eye"></i>
+        </button>
+      </label>
+      <button class="btn primary gate-submit" type="submit" id="btnLogin">
+        <i data-lucide="log-in"></i>登录
+      </button>
+      <div class="gate-msg" id="gateMsg" role="alert"></div>
+    </form>
+    <div class="gate-foot" id="gateFoot"></div>
+  </div>
+</div>
+
+<div class="app" id="app" hidden>
 <header class="topbar">
   <div class="brand">
     <div class="brand-mark"><i data-lucide="layers"></i></div>
@@ -23,20 +53,32 @@
     </div>
   </div>
   <div class="topbar-right">
-    <div class="key-slot">
-      <i data-lucide="key-round"></i>
-      <input id="adminKey" type="password" placeholder="管理密钥" autocomplete="off">
-      <button id="saveKey" class="mini" title="保存密钥"><i data-lucide="check"></i></button>
-    </div>
     <div class="pill" id="healthPill"><span class="dot"></span><span id="healthTxt">连接中</span></div>
+    <div class="usermenu">
+      <button class="btn ghost usermenu-btn" id="userBtn">
+        <i data-lucide="user-round"></i><span id="userName">—</span>
+        <i data-lucide="chevron-down" class="caret"></i>
+      </button>
+      <div class="usermenu-pop" id="userPop" hidden>
+        <button class="usermenu-item" id="btnOpenPwd"><i data-lucide="key-round"></i>修改密码</button>
+        <button class="usermenu-item danger" id="btnLogout"><i data-lucide="log-out"></i>退出登录</button>
+      </div>
+    </div>
   </div>
 </header>
+
+<div class="banner" id="pwdBanner" hidden>
+  <i data-lucide="triangle-alert"></i>
+  <span>当前仍在使用默认密码 <code>admin / admin</code>，面板已暴露在网络上，请立刻修改。</span>
+  <button class="btn ghost" id="btnBannerPwd">立即修改</button>
+</div>
 
 <nav class="tabs" id="tabs">
   <button class="tab active" data-view="overview"><i data-lucide="gauge"></i><span>总览</span></button>
   <button class="tab" data-view="accounts"><i data-lucide="users"></i><span>账号池</span></button>
   <button class="tab" data-view="register"><i data-lucide="smartphone"></i><span>添加账号</span></button>
   <button class="tab" data-view="models"><i data-lucide="boxes"></i><span>模型与倍率</span></button>
+  <button class="tab" data-view="keys"><i data-lucide="key-round"></i><span>API 密钥</span></button>
   <button class="tab" data-view="proxy"><i data-lucide="globe"></i><span>出口代理</span></button>
   <button class="tab" data-view="chat"><i data-lucide="message-square"></i><span>对话调试</span></button>
   <button class="tab" data-view="api"><i data-lucide="plug"></i><span>接入方式</span></button>
@@ -53,9 +95,28 @@
       <span><i data-lucide="activity"></i><b id="heroReq">—</b> 次请求</span>
       <span><i data-lucide="coins"></i><b id="heroSpent">—</b> 已消耗</span>
     </div>
+    <div class="hero-note" id="heroExcluded" hidden></div>
   </div>
 
   <div class="grid-4" id="statCards"></div>
+
+  <div class="card">
+    <div class="card-head">
+      <h2><i data-lucide="activity-square"></i>模型可用性</h2>
+      <div class="head-actions">
+        <div class="seg" id="healthWindow">
+          <button data-h="6">6 小时</button>
+          <button data-h="24" class="on">24 小时</button>
+          <button data-h="168">7 天</button>
+        </div>
+        <label class="inline-check"><input type="checkbox" id="healthOnlyUsed"><span>只看有调用的</span></label>
+        <button class="btn ghost" id="btnHealthRefresh"><i data-lucide="refresh-cw"></i>刷新</button>
+      </div>
+    </div>
+    <div id="healthKpi" class="hk-grid"></div>
+    <p class="hint">按真实调用日志统计，不主动探测上游。观察条每格一个时间桶，左「过去」右「现在」：<span class="lg ok"></span>全成功　<span class="lg degraded"></span>部分失败　<span class="lg bad"></span>多数失败　<span class="lg idle"></span>无调用。</p>
+    <div id="healthList" class="health-list"></div>
+  </div>
 
   <div class="card">
     <div class="card-head">
@@ -75,6 +136,9 @@
     <div class="card-head">
       <h2><i data-lucide="users"></i>账号池</h2>
       <div class="head-actions">
+        <button class="btn ghost on-off" id="btnHideDead">
+          <i data-lucide="eye-off"></i><span id="hideDeadTxt">隐藏不可用</span>
+        </button>
         <button class="btn ghost" id="btnPoolReload"><i data-lucide="rotate-cw"></i>重载</button>
         <button class="btn ghost" id="btnPoolBal"><i data-lucide="wallet"></i>刷新余额</button>
         <button class="btn ghost" id="btnPoolCheckin"><i data-lucide="calendar-check"></i>全部签到</button>
@@ -89,6 +153,7 @@
       <span class="hint" id="rotationHint" style="margin:0"></span>
       <button class="btn ghost" id="btnRotationSave"><i data-lucide="save"></i>应用</button>
     </div>
+    <div class="filter-note" id="poolFilterNote" hidden></div>
     <div class="table-wrap">
       <table id="poolTable">
         <thead><tr>
@@ -135,6 +200,7 @@
       </label>
       <label>或手填邀请码<input id="autoRegInviteManual" placeholder="留空则用左侧所选"></label>
       <label>标签（可选）<input id="autoRegLabel" placeholder="auto"></label>
+      <label>批量数量<input id="autoRegCount" type="number" min="1" max="20" value="1" inputmode="numeric"></label>
     </div>
     <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
       <button class="btn primary" id="btnAutoReg"><i data-lucide="play"></i>开始自动注册</button>
@@ -255,6 +321,46 @@
   </div>
 </section>
 
+<!-- ══════════════ API 密钥 ══════════════ -->
+<section class="view" id="view-keys">
+  <div class="card">
+    <div class="card-head">
+      <h2><i data-lucide="key-round"></i>API 密钥</h2>
+      <div class="head-actions">
+        <button class="btn ghost" id="btnKeysRefresh"><i data-lucide="refresh-cw"></i>刷新</button>
+        <button class="btn primary" id="btnKeyNew"><i data-lucide="plus"></i>生成新密钥</button>
+      </div>
+    </div>
+    <p class="hint">
+      这些密钥给<strong>外部客户端调用反代</strong>用（<code>/v1/*</code>），和登录本面板的账号密码是两套东西。
+      可以按用途生成多把、分别停用或删除，用量各自统计。密钥明文只在生成那一刻显示一次，之后只能重新生成。
+    </p>
+
+    <div class="keynew" id="keyNewBox" hidden>
+      <div class="keynew-head"><i data-lucide="party-popper"></i>新密钥已生成，请立即复制保存</div>
+      <div class="keynew-row">
+        <code id="keyNewVal" class="mono"></code>
+        <button class="btn primary" id="btnKeyNewCopy"><i data-lucide="copy"></i>复制</button>
+        <button class="btn ghost" id="btnKeyNewClose"><i data-lucide="x"></i></button>
+      </div>
+    </div>
+
+    <div class="table-wrap">
+      <table id="keyTable">
+        <thead><tr>
+          <th>名称</th><th>密钥</th><th>状态</th><th>请求</th><th>Tokens</th>
+          <th>消耗积分</th><th>最近使用</th><th>创建时间</th><th>操作</th>
+        </tr></thead>
+        <tbody></tbody>
+      </table>
+    </div>
+    <div class="empty" id="keyEmpty" hidden>
+      <i data-lucide="key-round"></i>
+      <p>还没有任何密钥。生成一把后填进客户端的 API Key 栏即可开始调用。</p>
+    </div>
+  </div>
+</section>
+
 <!-- ══════════════ 出口代理 ══════════════ -->
 <section class="view" id="view-proxy">
   <div class="card">
@@ -310,13 +416,13 @@
       <div class="api-box">
         <div class="api-label"><i data-lucide="terminal"></i>OpenAI 兼容</div>
         <div class="kv"><span>Base URL</span><code id="apiBase">—</code></div>
-        <div class="kv"><span>API Key</span><code>你设置的 WB_API_KEY</code></div>
+        <div class="kv"><span>API Key</span><code>在「API 密钥」页生成</code></div>
         <div class="kv"><span>端点</span><code>/v1/chat/completions · /v1/models</code></div>
       </div>
       <div class="api-box">
         <div class="api-label"><i data-lucide="terminal"></i>Anthropic 兼容</div>
         <div class="kv"><span>Base URL</span><code id="apiBase2">—</code></div>
-        <div class="kv"><span>Header</span><code>x-api-key: &lt;WB_API_KEY&gt;</code></div>
+        <div class="kv"><span>Header</span><code>x-api-key: &lt;你生成的密钥&gt;</code></div>
         <div class="kv"><span>端点</span><code>/v1/messages</code></div>
       </div>
     </div>
@@ -324,6 +430,48 @@
   </div>
 </section>
 </main>
+</div><!-- /.app -->
+
+<!-- ══════════════ 修改密码 ══════════════ -->
+<div class="modal" id="pwdModal" hidden>
+  <div class="modal-panel">
+    <div class="modal-head">
+      <h2><i data-lucide="key-round"></i>修改登录密码</h2>
+      <button class="mini" id="pwdClose" aria-label="关闭"><i data-lucide="x"></i></button>
+    </div>
+    <form id="pwdForm">
+      <label>当前密码<input id="pwdOld" type="password" autocomplete="current-password" required></label>
+      <label>新密码（至少 6 位）<input id="pwdNew" type="password" autocomplete="new-password" minlength="6" required></label>
+      <label>再输一次<input id="pwdNew2" type="password" autocomplete="new-password" minlength="6" required></label>
+      <div class="gate-msg" id="pwdMsg" role="alert"></div>
+      <div class="modal-foot">
+        <button type="button" class="btn ghost" id="pwdCancel">取消</button>
+        <button type="submit" class="btn primary"><i data-lucide="check"></i>确认修改</button>
+      </div>
+    </form>
+  </div>
+</div>
+
+<!-- ══════════════ 通用输入 / 确认（替代原生 prompt·confirm） ══════════════ -->
+<div class="modal" id="askModal" hidden>
+  <div class="modal-panel">
+    <div class="modal-head">
+      <h2 id="askHead"><i data-lucide="message-square-text"></i><span id="askTitle"></span></h2>
+      <button class="mini" id="askClose" aria-label="关闭"><i data-lucide="x"></i></button>
+    </div>
+    <form id="askForm">
+      <p class="ask-desc" id="askDesc"></p>
+      <label id="askInputWrap">
+        <span id="askLabel"></span>
+        <input id="askInput" type="text" autocomplete="off">
+      </label>
+      <div class="modal-foot">
+        <button type="button" class="btn ghost" id="askCancel">取消</button>
+        <button type="submit" class="btn primary" id="askOk"><i data-lucide="check"></i><span id="askOkTxt">确定</span></button>
+      </div>
+    </form>
+  </div>
+</div>
 
 <div class="toast-host" id="toastHost"></div>
 <script src="https://unpkg.com/lucide@latest/dist/umd/lucide.js"></script>

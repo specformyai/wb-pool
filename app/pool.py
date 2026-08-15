@@ -399,11 +399,18 @@ class AccountPool:
         by_status: dict[str, int] = {}
         for a in accs:
             by_status[a.status] = by_status.get(a.status, 0) + 1
+        # 总积分只算「真能用的号」：dead / disabled / 冷却中的 exhausted 都不计入，
+        # 否则面板显示的额度取不出来，纯属自欺。不可用部分单独给 credits_unusable。
+        usable = [a for a in accs if a.usable()]
+        cr_usable = round(sum(a.credits_total for a in usable if a.credits_total > 0), 2)
+        cr_all = round(sum(a.credits_total for a in accs if a.credits_total > 0), 2)
         return {
             "total": len(accs),
-            "usable": sum(1 for a in accs if a.usable()),
+            "usable": len(usable),
             "by_status": by_status,
-            "credits_total": round(sum(a.credits_total for a in accs if a.credits_total > 0), 2),
+            "credits_total": cr_usable,
+            "credits_total_all": cr_all,
+            "credits_unusable": round(cr_all - cr_usable, 2),
             "credits_spent": round(sum(a.credits_spent for a in accs), 4),
             "requests": sum(a.request_count for a in accs),
             "tokens": sum(a.token_count for a in accs),

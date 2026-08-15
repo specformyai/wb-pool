@@ -31,9 +31,10 @@ class AutoRegTask:
         self.invite_code = invite_code
         self.label = label
         self.created_at = time.time()
-        self.status = "pending"          # pending | running | done | failed
+        self.status = "pending"          # pending | running | done | failed | stopped
         self.steps: list[str] = []
         self.result: dict[str, Any] = {}
+        self.stop_flag = False           # 外部停止标志
 
     def log(self, msg: str) -> None:
         ts = time.strftime("%H:%M:%S")
@@ -63,15 +64,31 @@ class AutoRegistrar:
             for tid in stale:
                 del self._tasks[tid]
 
-    def start(self, invite_code: str = "", label: str = "") -> dict[str, Any]:
-        """启动一个异步自动注册任务，立即返回 task_id。"""
+    def start(self, invite_code: str = "", label: str = "", count: int = 1) -> dict[str, Any]:
+        """启动 count 个异步自动注册任务，立即返回 task_id 列表。"""
         self._gc()
-        task = AutoRegTask(secrets.token_urlsafe(8), invite_code=invite_code, label=label)
+        task_ids = []
+        for i in range(max(1, min(count, 20))):  # 限制 1-20 个
+            task = AutoRegTask(secrets.token_urlsafe(8), invite_code=invite_code,
+                             label=f"{label}_batch_{i+1}" if count > 1 and label else label)
+            with self._lock:
+                self._tasks[task.id] = task
+            t = threading.Thread(target=self._run, args=(task,), daemon=True)
+            t.start()
+            task_ids.append(task.id)
+        return {"ok": True, "task_ids": task_ids, "count": len(task_ids)}
+
+    def stop(self, task_id: str) -> dict[str, Any]:
+        """设置停止标志，任务会在下一个检查点终止。"""
         with self._lock:
-            self._tasks[task.id] = task
-        t = threading.Thread(target=self._run, args=(task,), daemon=True)
-        t.start()
-        return {"ok": True, "task_id": task.id}
+            task = self._tasks.get(task_id)
+        if not task:
+            return {"ok": False, "error": "任务不存在"}
+        if task.status in ("done", "failed", "stopped"):
+            return {"ok": False, "error": f"任务已完成（{task.status}）"}
+        task.stop_flag = True
+        task.log("收到停止信号")
+        return {"ok": True}
 
     def get(self, task_id: str) -> dict[str, Any] | None:
         with self._lock:
@@ -87,6 +104,12 @@ class AutoRegistrar:
         task.status = "running"
         phone = None
         try:
+            # 检查点：取号前
+            if task.stop_flag:
+                task.log("已停止（取号前）")
+                task.status = "stopped"
+                return
+
             # 1. 取号
             task.log("uoomsg 取号中（实卡过滤）…")
             res = uum.get_phone(self.token)
@@ -99,6 +122,13 @@ class AutoRegistrar:
             if res.get("skipped_virtual"):
                 task.log(f"跳过虚拟号: {res['skipped_virtual']}")
             task.log(f"取到号码: {phone}")
+
+            # 检查点：发码前
+            if task.stop_flag:
+                task.log("已停止（发码前），释放号码")
+                uum.release(self.token, phone)
+                task.status = "stopped"
+                return
 
             # 2. 发腾讯验证码
             task.log("向腾讯发送短信验证码…")
@@ -114,6 +144,13 @@ class AutoRegistrar:
             session_id = reg_res["session_id"]
             task.log(f"验证码已发出，出口: {reg_res.get('proxy', 'direct')}")
 
+            # 检查点：等码前
+            if task.stop_flag:
+                task.log("已停止（等码前），释放号码")
+                uum.release(self.token, phone)
+                task.status = "stopped"
+                return
+
             # 3. 等验证码
             task.log("轮询 uoomsg 等待验证码（最多 300s）…")
             sms_res = uum.get_sms(self.token, phone, timeout_s=300, poll_interval=5)
@@ -126,6 +163,13 @@ class AutoRegistrar:
                 return
             code = sms_res["code"]
             task.log(f"收到验证码: {code}（原文: {sms_res['raw'][:60]}）")
+
+            # 检查点：提交前
+            if task.stop_flag:
+                task.log("已停止（提交前），释放号码")
+                uum.release(self.token, phone)
+                task.status = "stopped"
+                return
 
             # 4. 提交验证码入池
             task.log("提交验证码，登录并入池…")

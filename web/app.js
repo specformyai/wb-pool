@@ -1,10 +1,11 @@
 /* wb-pool WebUI */
 const $ = s => document.querySelector(s);
 const $$ = s => [...document.querySelectorAll(s)];
-const LS = 'wbpool_admin_key';
-let KEY = localStorage.getItem(LS) || '';
 let MODELS = [];
 let regSession = null, regTimer = null;
+let ME = null;                                     // 当前登录用户
+let HIDE_DEAD = localStorage.getItem('wbpool_hide_dead') === '1';
+let HEALTH_WIN = Number(localStorage.getItem('wbpool_health_win') || 24);
 
 const icons = () => window.lucide && lucide.createIcons();
 
@@ -20,14 +21,62 @@ function toast(msg, kind = 'info') {
   setTimeout(() => { t.classList.add('out'); setTimeout(() => t.remove(), 320); }, kind === 'err' ? 6500 : 3600);
 }
 
-/* ---------- fetch ---------- */
+/* ---------- ask（替代原生 prompt / confirm） ----------
+   headless 浏览器和部分内嵌 WebView 里 window.prompt/confirm 会直接吊死整个页面，
+   所以统一走自绘 modal，返回 Promise：输入框取值 or null（取消）；确认框 true/false。 */
+let ASK_RESOLVE = null;
+function askClose(val) {
+  $('#askModal').hidden = true;
+  const f = ASK_RESOLVE; ASK_RESOLVE = null;
+  if (f) f(val);
+}
+function askOpen({ title, desc = '', label = '', value = '', ok = '确定', input = true, icon = 'message-square-text', danger = false }) {
+  return new Promise(resolve => {
+    ASK_RESOLVE = resolve;
+    $('#askTitle').textContent = title;
+    const d = $('#askDesc');
+    d.textContent = desc; d.hidden = !desc;
+    $('#askInputWrap').hidden = !input;
+    $('#askLabel').textContent = label;
+    $('#askInput').value = value;
+    $('#askInput').required = input;
+    $('#askOkTxt').textContent = ok;
+    $('#askOk').classList.toggle('danger', danger);
+    $('#askOk').classList.toggle('primary', !danger);
+    setIcon($('#askHead'), icon);
+    $('#askModal').hidden = false;
+    icons();
+    if (input) { const i = $('#askInput'); i.focus(); i.select(); }
+    else $('#askOk').focus();
+  });
+}
+const askText = (title, label, value = '', desc = '') =>
+  askOpen({ title, label, value, desc, input: true, icon: 'pencil-line' });
+const askConfirm = (title, desc, ok = '确认', danger = true) =>
+  askOpen({ title, desc, input: false, ok, danger, icon: 'alert-triangle' })
+    .then(v => v !== null);
+
+$('#askForm').addEventListener('submit', e => {
+  e.preventDefault();
+  askClose($('#askInputWrap').hidden ? true : $('#askInput').value);
+});
+$('#askClose').onclick = () => askClose(null);
+$('#askCancel').onclick = () => askClose(null);
+$('#askModal').addEventListener('click', e => { if (e.target === $('#askModal')) askClose(null); });
+document.addEventListener('keydown', e => {
+  if (e.key === 'Escape' && !$('#askModal').hidden) askClose(null);
+});
+
+/* ---------- fetch ----------
+   鉴权靠 HttpOnly 的 wb_session cookie，前端不再持有任何密钥。
+   任何接口返回 401 都直接把界面切回登录页。                        */
 async function api(path, opts = {}) {
   const h = { 'Content-Type': 'application/json', ...(opts.headers || {}) };
-  if (KEY) h['Authorization'] = `Bearer ${KEY}`;
-  const r = await fetch(path, { ...opts, headers: h });
+  const r = await fetch(path, { ...opts, headers: h, credentials: 'same-origin' });
   const txt = await r.text();
   let data; try { data = JSON.parse(txt); } catch { data = { raw: txt }; }
   if (!r.ok) {
+    if (r.status === 401) { showGate('登录已过期，请重新登录'); }
     const m = data?.detail?.error?.message || data?.error || data?.detail || txt.slice(0, 300);
     const e = new Error(typeof m === 'string' ? m : JSON.stringify(m));
     e.status = r.status;
@@ -59,21 +108,107 @@ $$('#tabs .tab').forEach(t => t.onclick = () => {
   if (v === 'accounts') { loadPool(); loadRotation().catch(() => {}); }
   if (v === 'register') loadInviteCodes().catch(() => {});
   if (v === 'models') loadModels(false);
+  if (v === 'keys') loadKeys();
   if (v === 'proxy') loadProxy();
-  if (v === 'overview') loadOverview();
+  if (v === 'overview') { loadOverview(); loadHealthBars(); }
   if (v === 'chat') loadChatAccounts().catch(() => {});
   if (v === 'api') fillApi();
 });
 
-/* ---------- key ---------- */
-$('#adminKey').value = KEY;
-$('#saveKey').onclick = () => {
-  KEY = $('#adminKey').value.trim();
-  localStorage.setItem(LS, KEY);
-  toast('密钥已保存', 'ok');
-  health(); loadOverview();
+/* ---------- 登录 / 会话 ---------- */
+function showGate(msg) {
+  ME = null;
+  $('#app').hidden = true;
+  $('#gate').hidden = false;
+  $('#gateMsg').textContent = msg || '';
+  $('#gateMsg').classList.toggle('show', !!msg);
+  icons();
+  setTimeout(() => $('#loginUser').focus(), 60);
+}
+function showApp(state) {
+  ME = state.user;
+  $('#gate').hidden = true;
+  $('#app').hidden = false;
+  $('#userName').textContent = state.user || '已登录';
+  $('#pwdBanner').hidden = !state.default_password;
+  icons();
+}
+async function checkAuth() {
+  try {
+    const st = await fetch('/api/auth/state', { credentials: 'same-origin' }).then(r => r.json());
+    if (st.logged_in) { showApp(st); return true; }
+    showGate('');
+    $('#gateFoot').textContent = st.default_password
+      ? '首次使用：默认账号 admin / admin，登录后请立刻改密码。' : '';
+    return false;
+  } catch {
+    showGate('连不上服务端');
+    return false;
+  }
+}
+$('#gateForm').addEventListener('submit', async e => {
+  e.preventDefault();
+  const btn = $('#btnLogin');
+  busy(btn, true);
+  try {
+    const d = await fetch('/api/auth/login', {
+      method: 'POST', credentials: 'same-origin',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ user: $('#loginUser').value.trim(), password: $('#loginPass').value }),
+    }).then(async r => {
+      const j = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error(j.detail || '登录失败');
+      return j;
+    });
+    $('#loginPass').value = '';
+    showApp({ user: d.user, default_password: d.default_password });
+    toast('登录成功', 'ok');
+    boot();
+  } catch (err) {
+    $('#gateMsg').textContent = err.message;
+    $('#gateMsg').classList.add('show');
+    $('#loginPass').select();
+  } finally { busy(btn, false); }
+});
+$('#loginEye').onclick = () => {
+  const i = $('#loginPass');
+  i.type = i.type === 'password' ? 'text' : 'password';
+  $('#loginEye').innerHTML = `<i data-lucide="${i.type === 'password' ? 'eye' : 'eye-off'}"></i>`;
+  icons();
 };
-$('#adminKey').addEventListener('keydown', e => { if (e.key === 'Enter') $('#saveKey').click(); });
+$('#userBtn').onclick = e => { e.stopPropagation(); $('#userPop').hidden = !$('#userPop').hidden; };
+document.addEventListener('click', () => { if ($('#userPop')) $('#userPop').hidden = true; });
+$('#btnLogout').onclick = async () => {
+  await fetch('/api/auth/logout', { method: 'POST', credentials: 'same-origin' }).catch(() => {});
+  showGate('已退出登录');
+};
+
+/* 修改密码 */
+function openPwd() { $('#pwdModal').hidden = false; $('#pwdMsg').classList.remove('show'); icons(); $('#pwdOld').focus(); }
+function closePwd() { $('#pwdModal').hidden = true; ['#pwdOld', '#pwdNew', '#pwdNew2'].forEach(s => $(s).value = ''); }
+$('#btnOpenPwd').onclick = openPwd;
+$('#btnBannerPwd').onclick = openPwd;
+$('#pwdClose').onclick = closePwd;
+$('#pwdCancel').onclick = closePwd;
+$('#pwdModal').addEventListener('click', e => { if (e.target === $('#pwdModal')) closePwd(); });
+$('#pwdForm').addEventListener('submit', async e => {
+  e.preventDefault();
+  const msg = $('#pwdMsg');
+  if ($('#pwdNew').value !== $('#pwdNew2').value) {
+    msg.textContent = '两次输入的新密码不一样'; msg.classList.add('show'); return;
+  }
+  try {
+    await api('/api/auth/password', {
+      method: 'POST',
+      body: JSON.stringify({ old: $('#pwdOld').value, new: $('#pwdNew').value }),
+    });
+    closePwd();
+    toast('密码已修改，请重新登录', 'ok');
+    showGate('密码已修改，请用新密码登录');
+  } catch (err) {
+    msg.textContent = err.message; msg.classList.add('show');
+  }
+});
 
 /* ---------- health ---------- */
 async function health() {
@@ -102,6 +237,15 @@ function ago(ts) {
   return Math.floor(s / 86400) + ' 天前';
 }
 const ST = { active: '可用', exhausted: '配额耗尽', dead: '失效', disabled: '已停用' };
+/* created_at 后端给的是 unix 秒（不是 ISO 串），统一格式化成 YYYY-MM-DD HH:MM */
+function when(ts) {
+  if (!ts) return '—';
+  const n = typeof ts === 'number' ? ts : Number(ts);
+  const d = Number.isFinite(n) ? new Date(n * 1000) : new Date(String(ts));
+  if (isNaN(d.getTime())) return '—';
+  const p = x => String(x).padStart(2, '0');
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
+}
 
 async function loadOverview() {
   let d;
@@ -112,6 +256,17 @@ async function loadOverview() {
   $('#heroTotal').textContent = s.total;
   $('#heroReq').textContent = fmt(s.requests);
   $('#heroSpent').textContent = fmt(s.credits_spent, 2);
+
+  // 总额已排除不可用/停用账号，把被排除的部分单独说清楚，免得对不上账
+  const ex = Number(s.credits_unusable || 0);
+  const note = $('#heroExcluded');
+  if (ex > 0.005) {
+    const dead = (s.total || 0) - (s.usable || 0);
+    note.innerHTML = `<i data-lucide="info"></i>已排除 ${dead} 个不可用 / 停用账号上的 ${fmt(ex, 2)} 积分（连池内合计 ${fmt(s.credits_total_all, 2)}）`;
+    note.hidden = false;
+  } else {
+    note.hidden = true;
+  }
 
   const by = s.by_status || {};
   $('#statCards').innerHTML = [
@@ -140,6 +295,94 @@ async function loadOverview() {
   if (sel) sel.innerHTML = d.accounts.map(a => `<option value="${a.phone}">${a.masked}</option>`).join('');
 }
 
+/* ---------- 模型可用性观察条 ---------- */
+const HEALTH_LABEL = { ok: '正常', degraded: '不稳', bad: '异常', idle: '无调用' };
+
+function paintHealthWindow() {
+  $$('#healthWindow button').forEach(b => b.classList.toggle('on', Number(b.dataset.h) === HEALTH_WIN));
+}
+$$('#healthWindow button').forEach(b => b.onclick = () => {
+  HEALTH_WIN = Number(b.dataset.h);
+  localStorage.setItem('wbpool_health_win', String(HEALTH_WIN));
+  paintHealthWindow(); loadHealthBars();
+});
+$('#healthOnlyUsed').onchange = () => loadHealthBars();
+$('#btnHealthRefresh').onclick = e => run(e.currentTarget, loadHealthBars);
+
+async function loadHealthBars() {
+  paintHealthWindow();
+  const d = await api(`/api/calls/health?window_h=${HEALTH_WIN}&buckets=50`).catch(() => null);
+  if (!d) return;
+
+  const pct1 = v => v === null || v === undefined ? '—' : (v * 100).toFixed(1) + '%';
+  $('#healthKpi').innerHTML = [
+    ['模型数量', fmt(d.model_count), '', 'line-chart'],
+    ['总请求', fmt(d.total), '', 'activity'],
+    ['平均成功率', pct1(d.avg_rate), '', 'check-circle-2'],
+    ['异常模型', fmt(d.abnormal), `正常 ${fmt(d.normal)}${d.idle ? ` · 无调用 ${fmt(d.idle)}` : ''}`,
+      'alert-triangle'],
+  ].map(([k, v, sub, ic]) => `<div class="hk">
+      <div class="hk-ico"><i data-lucide="${ic}"></i></div>
+      <div class="hk-label">${k}</div>
+      <div class="hk-val">${v}</div>
+      ${sub ? `<div class="hk-sub">${sub}</div>` : ''}
+    </div>`).join('');
+
+  let list = d.models || [];
+  if ($('#healthOnlyUsed').checked) list = list.filter(m => m.total > 0);
+  if (!list.length) {
+    $('#healthList').innerHTML = `<div class="chat-empty">这个窗口内还没有调用记录。去「对话调试」发一条，或让客户端跑起来，这里就会有数据。</div>`;
+    icons(); return;
+  }
+
+  const secs = d.bucket_seconds || 0;
+  const span = secs >= 3600 ? `${(secs / 3600).toFixed(1)} 小时` : `${Math.round(secs / 60)} 分钟`;
+
+  $('#healthList').innerHTML = list.map(m => {
+    const bars = m.buckets.map(b => {
+      const tip = b.ok + b.fail ? `成功 ${b.ok} / 失败 ${b.fail}（每格 ${span}）` : `无调用（每格 ${span}）`;
+      return `<i class="hb ${b.state}" title="${tip}"></i>`;
+    }).join('');
+    // 徽章取 state 与 tail_state 里更差的那个：累计 99% 但现在正连挂，不能还写「正常」
+    const RANK = { bad: 0, degraded: 1, ok: 2, idle: 3 };
+    const shown = RANK[m.tail_state] < RANK[m.state] ? m.tail_state : m.state;
+    const BIC = { ok: 'check-circle-2', degraded: 'alert-triangle', bad: 'x-circle', idle: 'minus-circle' };
+    const tail = m.tail_state === 'bad' && m.state !== 'bad'
+      ? `<span class="hr-tail"><i data-lucide="trending-down"></i>最近连续失败</span>` : '';
+    const rate = m.rate === null ? '—' : (m.rate * 100).toFixed(m.rate === 1 ? 0 : 1) + '%';
+    const err = m.last_error
+      ? `<div class="hr-err" title="${esc(m.last_error)}"><i data-lucide="alert-circle"></i>${esc(m.last_error)}</div>` : '';
+    const ttft = m.ttft_ms ? (m.ttft_ms / 1000).toFixed(1) + ' s' : '—';
+    const tps = m.tps ? m.tps.toFixed(m.tps < 10 ? 1 : 0) + ' t/s' : '—';
+    return `<div class="hcard">
+      <div class="hc-head">
+        <span class="hc-name">${esc(m.model)}</span>
+        <span class="badge h-${shown}"><i data-lucide="${BIC[shown]}"></i>${HEALTH_LABEL[shown]}</span>
+      </div>
+      <div class="hc-meta">
+        <span>账号 <b>${fmt(m.accounts || 0)}</b></span>
+        <span>模型 <b class="mono">${esc(m.model)}</b></span>
+        ${tail}
+      </div>
+      <div class="hc-meta"><span><b>${fmt(m.total)}</b> 总请求</span>
+        <span>p50 / p95 <b class="mono">${m.p50_ms ? fmt(m.p50_ms) + ' / ' + fmt(m.p95_ms) + ' ms' : '—'}</b></span></div>
+      <div class="hc-metrics">
+        <div><span>成功率</span><b>${rate}</b></div>
+        <div><span>成功</span><b>${fmt(m.ok)}</b></div>
+        <div><span>错误</span><b class="${m.fail ? 'e' : ''}">${fmt(m.fail)}</b></div>
+      </div>
+      <div class="hbar">${bars}</div>
+      <div class="hc-axis"><span>过去</span><span>现在</span></div>
+      ${err}
+      <div class="hc-foot">
+        <span>近期平均首字延迟<b>${ttft}</b></span>
+        <span>近期平均输出速度<b>${tps}</b></span>
+      </div>
+    </div>`;
+  }).join('');
+  icons();
+}
+
 $('#btnRefreshBal').onclick = e => run(e.currentTarget, async () => {
   const r = await api('/api/pool/refresh_balance', { method: 'POST' });
   toast(`已刷新 ${r.results.length} 个账号余额`, 'ok'); loadOverview(); health();
@@ -151,11 +394,48 @@ $('#btnCheckin').onclick = e => run(e.currentTarget, async () => {
 });
 
 /* ---------- pool ---------- */
+function setIcon(el, name) {
+  // lucide.createIcons() 会把 <i data-lucide> 整个替换成 <svg>，
+  // 所以第二次切换时 querySelector('i') 是 null —— 必须连 svg 一起找，换成新的 <i> 再重绘
+  const old = el.querySelector('i[data-lucide], svg');
+  if (!old) return;
+  const i = document.createElement('i');
+  i.setAttribute('data-lucide', name);
+  old.replaceWith(i);
+}
+function paintHideDead() {
+  const b = $('#btnHideDead');
+  b.classList.toggle('on', HIDE_DEAD);
+  b.setAttribute('aria-pressed', HIDE_DEAD ? 'true' : 'false');
+  $('#hideDeadTxt').textContent = HIDE_DEAD ? '已隐藏不可用' : '隐藏不可用';
+  setIcon(b, HIDE_DEAD ? 'eye-off' : 'eye');
+  icons();
+}
+$('#btnHideDead').onclick = () => {
+  HIDE_DEAD = !HIDE_DEAD;
+  localStorage.setItem('wbpool_hide_dead', HIDE_DEAD ? '1' : '0');
+  paintHideDead(); loadPool();
+};
+
 async function loadPool() {
   const d = await api('/api/pool').catch(e => { toast(e.message, 'err'); return null; });
   if (!d) return;
+  paintHideDead();
+
+  const all = d.accounts || [];
+  // usable 由后端算（active 且未过冷却期），前端只负责按它过滤
+  const shown = HIDE_DEAD ? all.filter(a => a.usable) : all;
+  const hidden = all.length - shown.length;
+  const note = $('#poolFilterNote');
+  if (HIDE_DEAD && hidden > 0) {
+    note.innerHTML = `<i data-lucide="eye-off"></i>已隐藏 ${hidden} 个不可用账号（失效 / 停用 / 配额耗尽冷却中）`;
+    note.hidden = false;
+  } else {
+    note.hidden = true;
+  }
+
   const tb = $('#poolTable tbody');
-  tb.innerHTML = d.accounts.length ? d.accounts.map(a => `
+  tb.innerHTML = shown.length ? shown.map(a => `
     <tr>
       <td><div style="font-family:'JetBrains Mono',monospace">${a.masked}</div>
           <div style="font-size:11px;color:var(--txt3)">${a.label || a.uid.slice(0, 10) || '—'}</div></td>
@@ -164,16 +444,18 @@ async function loadPool() {
       <td class="num">${fmt(a.credits_spent, 3)}</td>
       <td class="num">${a.request_count}</td>
       <td class="num">${a.expires_in_h > 0 ? a.expires_in_h + ' h' : '已过期'}</td>
-      <td style="font-size:11px;color:var(--txt3)">${a.registered_at ? a.registered_at.slice(0, 10) : '—'}</td>
+      <td style="font-size:11px;color:var(--txt3)">${when(a.registered_at).slice(0, 10)}</td>
       <td style="font-size:11.5px;color:var(--txt3)">${a.last_checkin || '—'}</td>
       <td class="err-cell" title="${(a.last_error || '').replace(/"/g, '&quot;')}">${a.last_error || '—'}</td>
       <td><div class="row-actions">
         <button class="btn tiny ghost" data-act="ci" data-p="${a.phone}" title="单独签到"><i data-lucide="calendar-check-2"></i></button>
         <button class="btn tiny ghost" data-act="rt" data-p="${a.phone}" title="刷新 token"><i data-lucide="refresh-cw"></i></button>
         <button class="btn tiny ghost" data-act="tg" data-p="${a.phone}" data-s="${a.status === 'disabled' ? 'active' : 'disabled'}" title="启用/停用"><i data-lucide="power"></i></button>
-        <button class="btn tiny danger" data-act="rm" data-p="${a.phone}" title="移除"><i data-lucide="trash-2"></i></button>
+        <button class="btn tiny danger" data-act="rm" data-p="${a.phone}" data-m="${esc(a.masked)}" title="移除"><i data-lucide="trash-2"></i></button>
       </div></td>
-    </tr>`).join('') : '<tr><td colspan="10" style="text-align:center;color:var(--txt3);padding:30px">池子是空的</td></tr>';
+    </tr>`).join('')
+    : `<tr><td colspan="10" style="text-align:center;color:var(--txt3);padding:30px">${
+        all.length ? '当前筛选下没有账号，点「已隐藏不可用」可看全部' : '池子是空的'}</td></tr>`;
   icons();
 
   tb.querySelectorAll('button[data-act]').forEach(b => b.onclick = () => run(b, async () => {
@@ -183,7 +465,7 @@ async function loadPool() {
       if (r.skipped || r.already) toast(`${r.masked || p} 今天已签到`, 'info');
       else toast(r.ok ? `签到成功 +${r.credit} 积分，余额 ${r.credits_total}` : `签到失败: ${r.error}`, r.ok ? 'ok' : 'err');
     } else if (act === 'rm') {
-      if (!confirm(`确认从池中移除 ${p}？`)) return;
+      if (!await askConfirm('移除账号', `确认把 ${b.dataset.m || p} 从池中移除？移除后不再参与轮询，本地登录态一并清除。`, '移除')) return;
       await api('/api/pool/remove', { method: 'POST', body: JSON.stringify({ phone: p }) });
       toast('已移除', 'ok');
     } else if (act === 'tg') {
@@ -576,10 +858,101 @@ async function send() {
     body.textContent = `[异常] ${e.message}`;
   } finally { busy(btn, false); }
 }
-const esc = s => String(s).replace(/[<>&]/g, c => ({ '<': '&lt;', '>': '&gt;', '&': '&amp;' }[c]));
+const esc = s => String(s).replace(/[<>&"]/g, c => ({ '<': '&lt;', '>': '&gt;', '&': '&amp;', '"': '&quot;' }[c]));
 $('#btnChatSend').onclick = send;
 $('#chatInput').addEventListener('keydown', e => {
   if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); send(); }
+});
+
+/* ---------- API 密钥 ---------- */
+async function loadKeys() {
+  const d = await api('/api/keys').catch(e => { toast(e.message, 'err'); return null; });
+  if (!d) return;
+  const keys = d.keys || [];
+  $('#keyEmpty').hidden = keys.length > 0;
+  const tb = $('#keyTable tbody');
+  tb.innerHTML = keys.map(k => {
+    const isEnv = k.id === 'env';
+    return `<tr class="${k.enabled ? '' : 'row-off'}">
+      <td>
+        <div class="k-name">${esc(k.name || '未命名')}</div>
+        ${isEnv ? '<div class="k-sub">来自 .env 的 WB_API_KEY</div>'
+                : (k.note ? `<div class="k-sub">${esc(k.note)}</div>` : '')}
+      </td>
+      <td><code class="mono k-mask">${esc(k.masked)}</code>
+        ${isEnv ? '' : `<button class="btn tiny ghost" data-act="reveal" data-k="${k.id}" title="查看完整密钥"><i data-lucide="eye"></i></button>`}
+      </td>
+      <td><span class="badge ${k.enabled ? 'active' : 'disabled'}">${k.enabled ? '启用' : '已停用'}</span></td>
+      <td class="num">${fmt(k.request_count)}</td>
+      <td class="num">${fmt(k.tokens)}</td>
+      <td class="num">${fmt(k.credits, 3)}</td>
+      <td style="font-size:11.5px;color:var(--txt3)">${ago(k.last_used)}</td>
+      <td style="font-size:11px;color:var(--txt3)">${when(k.created_at)}</td>
+      <td><div class="row-actions">
+        ${isEnv ? '<span class="k-sub">—</span>' : `
+        <button class="btn tiny ghost" data-act="toggle" data-k="${k.id}" data-en="${k.enabled ? 0 : 1}" title="${k.enabled ? '停用' : '启用'}"><i data-lucide="power"></i></button>
+        <button class="btn tiny ghost" data-act="rename" data-k="${k.id}" data-n="${esc(k.name || '')}" title="改名"><i data-lucide="pencil"></i></button>
+        <button class="btn tiny ghost" data-act="rotate" data-k="${k.id}" title="重新生成"><i data-lucide="refresh-cw"></i></button>
+        <button class="btn tiny danger" data-act="del" data-k="${k.id}" title="删除"><i data-lucide="trash-2"></i></button>`}
+      </div></td>
+    </tr>`;
+  }).join('');
+  icons();
+
+  tb.querySelectorAll('button[data-act]').forEach(b => b.onclick = () => run(b, async () => {
+    const id = b.dataset.k, act = b.dataset.act;
+    if (act === 'reveal') {
+      const r = await api(`/api/keys/${id}/reveal`);
+      showNewKey(r.key, '完整密钥');
+    } else if (act === 'toggle') {
+      await api(`/api/keys/${id}/update`, {
+        method: 'POST', body: JSON.stringify({ enabled: b.dataset.en === '1' }),
+      });
+      toast('已更新', 'ok');
+    } else if (act === 'rename') {
+      const name = await askText('给密钥改名', '名称', b.dataset.n);
+      if (name === null) return;
+      await api(`/api/keys/${id}/update`, { method: 'POST', body: JSON.stringify({ name }) });
+      toast('已改名', 'ok');
+    } else if (act === 'rotate') {
+      if (!await askConfirm('重新生成密钥', '旧密钥会立刻失效，正在用它的客户端需要换成新密钥。', '重新生成')) return;
+      const r = await api(`/api/keys/${id}/rotate`, { method: 'POST' });
+      showNewKey(r.key, '密钥已重新生成');
+      toast('已重新生成', 'ok');
+    } else if (act === 'del') {
+      if (!await askConfirm('删除密钥', '删除后用这把密钥的客户端会立刻收到 401，且无法恢复。', '删除')) return;
+      await api(`/api/keys/${id}`, { method: 'DELETE' });
+      toast('已删除', 'ok');
+    }
+    loadKeys();
+  }));
+}
+function showNewKey(key, title) {
+  $('#keyNewBox').hidden = false;
+  $('#keyNewVal').textContent = key;
+  $('#keyNewBox').querySelector('.keynew-head').innerHTML =
+    `<i data-lucide="party-popper"></i>${title || '新密钥已生成，请立即复制保存'}`;
+  icons();
+}
+$('#btnKeyNewClose').onclick = () => { $('#keyNewBox').hidden = true; };
+$('#btnKeyNewCopy').onclick = async () => {
+  const v = $('#keyNewVal').textContent;
+  try { await navigator.clipboard.writeText(v); toast('已复制到剪贴板', 'ok'); }
+  catch { // http 页面没有 clipboard 权限时退回选中
+    const r = document.createRange(); r.selectNode($('#keyNewVal'));
+    getSelection().removeAllRanges(); getSelection().addRange(r);
+    toast('已选中，按 Ctrl+C 复制', 'info');
+  }
+};
+$('#btnKeysRefresh').onclick = e => run(e.currentTarget, loadKeys);
+$('#btnKeyNew').onclick = e => run(e.currentTarget, async () => {
+  const name = await askText('生成新密钥', '名称', '默认',
+    '给这把密钥起个名字，方便以后区分用途（例如 cherry-studio / 我的手机）。');
+  if (name === null) return;
+  const r = await api('/api/keys', { method: 'POST', body: JSON.stringify({ name: name.trim() || '默认' }) });
+  showNewKey(r.key, '新密钥已生成，请立即复制保存');
+  toast('已生成', 'ok');
+  loadKeys();
 });
 
 /* ---------- api tab ---------- */
@@ -611,10 +984,15 @@ curl ${base}/v1/models -H "Authorization: Bearer $WB_API_KEY"`;
 }
 
 /* ---------- boot ---------- */
+let bootHealthTimer = null;
+function boot() {
+  icons();
+  health(); loadOverview(); loadHealthBars(); fillApi();
+  loadModels(false).catch(() => {});
+  if (!bootHealthTimer) bootHealthTimer = setInterval(() => { if (ME) health(); }, 30000);
+}
 icons();
-health(); loadOverview(); fillApi();
-loadModels(false).catch(() => {});
-setInterval(health, 30000);
+checkAuth().then(ok => { if (ok) boot(); });
 
 /* ---------- 自动注册（uoomsg） ---------- */
 let autoRegPollTimer = null;
@@ -673,11 +1051,12 @@ function startAutoRegPoll() {
 $('#btnAutoReg').onclick = e => run(e.currentTarget, async () => {
   const inviteCode = ($('#autoRegInviteManual').value.trim() || $('#autoRegInviteSel').value || '');
   const label = $('#autoRegLabel').value.trim();
+  const count = Math.max(1, Math.min(20, Number($('#autoRegCount').value) || 1));
   const r = await api('/api/auto_register/start', {
     method: 'POST',
-    body: JSON.stringify({ invite_code: inviteCode, label }),
+    body: JSON.stringify({ invite_code: inviteCode, label, count }),
   });
-  toast(`自动注册任务已启动（${r.task_id}）`, 'ok');
+  toast(`已启动 ${r.count || count} 个自动注册任务`, 'ok');
   await renderAutoRegTasks().catch(() => {});
   startAutoRegPoll();
 });

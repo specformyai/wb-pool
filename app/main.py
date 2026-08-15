@@ -20,7 +20,7 @@ from typing import Any, Iterator
 
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
-from fastapi import Depends, FastAPI, Header, HTTPException, Request
+from fastapi import Cookie, Depends, FastAPI, Header, HTTPException, Request, Response
 from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
@@ -28,6 +28,8 @@ from . import upstream
 from . import invite as invite_mod
 from . import uoomsg as uum
 from .accounting import Ledger
+from .apikeys import KeyStore
+from .calllog import CallLog
 from .pool import Account, AccountPool
 from .proxies import DEFAULT_EXITS, ProxyManager, is_proxy_error
 from .register import Registrar
@@ -36,6 +38,7 @@ from .upstream_sync import (STATIC_MODELS, static_models, merge_unlisted,
                             is_cache_expired, in_fail_cooldown,
                             load_models_cache as load_sync_cache, resolve_models,
                             sync_models_from_upstream, to_openai_data, vendor_of)
+from .webauth import COOKIE_NAME, SESSION_TTL, WebAuth
 
 # --------------------------------------------------------------------------- #
 # 配置
@@ -47,18 +50,25 @@ DATA_DIR.mkdir(parents=True, exist_ok=True)
 ACCOUNTS_FILE = Path(os.environ.get("WB_ACCOUNTS_FILE", DATA_DIR / "accounts.jsonl"))
 MODELS_CACHE = DATA_DIR / "models_cache.json"
 PROXY_STATE = DATA_DIR / "proxy_state.json"
+APIKEYS_FILE = DATA_DIR / "apikeys.json"
+WEBAUTH_FILE = DATA_DIR / "webauth.json"
+CALLS_FILE = DATA_DIR / "calls.jsonl"
 
-API_KEY = os.environ.get("WB_API_KEY", "")            # 反代访问密钥（空 = 不校验）
-ADMIN_KEY = os.environ.get("WB_ADMIN_KEY", API_KEY)   # 管理接口密钥
+API_KEY = os.environ.get("WB_API_KEY", "")            # 兼容老客户端的内建 key
+ADMIN_KEY = os.environ.get("WB_ADMIN_KEY", API_KEY)   # 管理接口后备密钥（供脚本用）
 PROXY_MODE = os.environ.get("WB_PROXY_MODE", "off")   # off | fixed | rotate
 PROXY_HOST = os.environ.get("WB_PROXY_HOST", "127.0.0.1")
 PROXY_FIXED = os.environ.get("WB_PROXY_URL", "")
 CHECKIN_CRON = os.environ.get("WB_CHECKIN_CRON", "5 1 * * *")
 BALANCE_INTERVAL = int(os.environ.get("WB_BALANCE_INTERVAL_MIN", "30"))
 UOOMSG_TOKEN = os.environ.get("WB_UOOMSG_TOKEN", "")
+COOKIE_SECURE = os.environ.get("WB_COOKIE_SECURE", "auto")   # auto | on | off
 
 pool = AccountPool(ACCOUNTS_FILE)
 ledger = Ledger(DATA_DIR / "ledger.json")
+keystore = KeyStore(APIKEYS_FILE, env_key=API_KEY)
+webauth = WebAuth(WEBAUTH_FILE)
+calllog = CallLog(CALLS_FILE)
 pm = ProxyManager(mode=PROXY_MODE, host=PROXY_HOST, fixed_url=PROXY_FIXED,
                   exits=DEFAULT_EXITS, state_file=PROXY_STATE)
 registrar = Registrar(pool, pm)
@@ -67,11 +77,13 @@ auto_registrar = AutoRegistrar(registrar, UOOMSG_TOKEN)
 pool.proxy_mgr = pm
 scheduler = BackgroundScheduler(timezone="Asia/Shanghai")
 
-app = FastAPI(title="wb-pool", version="1.0.0", docs_url="/api/docs", redoc_url=None)
+app = FastAPI(title="wb-pool", version="1.1.0", docs_url="/api/docs", redoc_url=None)
 
 
 # --------------------------------------------------------------------------- #
 # 鉴权
+#   /v1/*  —— API key（keystore 里的任意一把，或 .env 的 WB_API_KEY）
+#   /api/* —— WebUI session cookie；也接受 ADMIN_KEY 便于脚本直连
 # --------------------------------------------------------------------------- #
 def _extract_key(authorization: str | None, x_api_key: str | None) -> str:
     if authorization and authorization.lower().startswith("bearer "):
@@ -79,20 +91,58 @@ def _extract_key(authorization: str | None, x_api_key: str | None) -> str:
     return (x_api_key or "").strip()
 
 
-def require_api(authorization: str | None = Header(None),
-                x_api_key: str | None = Header(None, alias="x-api-key")) -> None:
-    if not API_KEY:
-        return
-    if _extract_key(authorization, x_api_key) != API_KEY:
+def require_api(request: Request,
+                authorization: str | None = Header(None),
+                x_api_key: str | None = Header(None, alias="x-api-key")) -> dict[str, Any]:
+    """校验反代 key，并把命中的 key 记录挂到 request.state 供落账使用。"""
+    rec = keystore.verify(_extract_key(authorization, x_api_key))
+    if rec is None:
         raise HTTPException(401, "invalid api key")
+    request.state.wb_key = rec
+    return rec
 
 
 def require_admin(authorization: str | None = Header(None),
-                  x_api_key: str | None = Header(None, alias="x-api-key")) -> None:
-    if not ADMIN_KEY:
-        return
-    if _extract_key(authorization, x_api_key) != ADMIN_KEY:
-        raise HTTPException(401, "invalid admin key")
+                  x_api_key: str | None = Header(None, alias="x-api-key"),
+                  wb_session: str | None = Cookie(None, alias=COOKIE_NAME)) -> str:
+    """WebUI/管理接口：优先 session cookie，其次 ADMIN_KEY（脚本/curl）。"""
+    s = webauth.session(wb_session or "")
+    if s:
+        return s["user"]
+    if ADMIN_KEY and _extract_key(authorization, x_api_key) == ADMIN_KEY:
+        return "admin-key"
+    raise HTTPException(401, "未登录")
+
+
+def _key_of(request: Request) -> dict[str, Any]:
+    return getattr(request.state, "wb_key", None) or {"id": "", "name": ""}
+
+
+def _log_call(request: Request, *, model: str, ok: bool, endpoint: str,
+              t0: float, tokens: int = 0, credits: float = 0.0,
+              account: str = "", code: Any = None, error: str = "",
+              stream: bool = False, t_first: float = 0.0,
+              out_tokens: int = 0) -> None:
+    """一次上游调用落一行 calls.jsonl，并把用量记到对应的 API key 上。
+
+    t_first  = 收到上游首包的时刻（用来算首字延迟）
+    out_tokens = 输出 token 数（用来算 t/s，只统计首包之后的生成阶段）
+    """
+    k = _key_of(request)
+    now = time.time()
+    ttft = int((t_first - t0) * 1000) if t_first > t0 else 0
+    gen_s = (now - t_first) if t_first > t0 else 0.0
+    tps = (out_tokens / gen_s) if (out_tokens > 0 and gen_s > 0.05) else 0.0
+    try:
+        calllog.record(model=model, ok=ok, endpoint=endpoint,
+                       ms=int((now - t0) * 1000), ttft_ms=ttft, tps=tps,
+                       tokens=tokens, credits=credits, account=account,
+                       key_id=k.get("id", ""), key_name=k.get("name", ""),
+                       code=code, error=error, stream=stream)
+    except Exception:  # noqa: BLE001
+        pass
+    if ok:
+        keystore.record_use(k.get("id", ""), tokens=tokens, credits=credits)
 
 
 # --------------------------------------------------------------------------- #
@@ -173,6 +223,7 @@ async def chat_completions(request: Request) -> Any:
     tried: list[str] = []
     max_tries = 1 if force_key else min(3, max(1, len(pool.all())))
     for _ in range(max_tries):
+        t0 = time.time()
         acc = _pick_account(force_key)
         if acc.masked() in tried:
             continue
@@ -181,8 +232,12 @@ async def chat_completions(request: Request) -> Any:
         try:
             gen = upstream.stream_chat(acc.access_token, payload, proxy=proxy)
             first = next(gen)          # 触发首包，才能捕获上游错误
+            t_first = time.time()      # 首字延迟锚在这里
         except upstream.UpstreamError as exc:
             last_err = f"{exc.code}: {exc.msg}"
+            _log_call(request, model=model, ok=False, endpoint="chat", t0=t0,
+                      account=acc.masked(), code=exc.code, error=exc.msg,
+                      stream=want_stream)
             if force_key:
                 raise HTTPException(502, {"error": {"message": last_err,
                                                     "code": exc.code,
@@ -194,12 +249,16 @@ async def chat_completions(request: Request) -> Any:
             continue
         except StopIteration:
             last_err = "上游返回空流"
+            _log_call(request, model=model, ok=False, endpoint="chat", t0=t0,
+                      account=acc.masked(), error=last_err, stream=want_stream)
             if force_key:
                 raise HTTPException(502, {"error": {"message": last_err, "type": "upstream_error"}})
             pool.release(acc, error=last_err)
             continue
         except Exception as exc:       # noqa: BLE001
             last_err = str(exc)[:200]
+            _log_call(request, model=model, ok=False, endpoint="chat", t0=t0,
+                      account=acc.masked(), error=last_err, stream=want_stream)
             if force_key:
                 raise HTTPException(502, {"error": {"message": last_err, "type": "upstream_error"}})
             # 代理链路故障：拉黑该出口，换出口重试，不污染账号 last_error
@@ -221,10 +280,16 @@ async def chat_completions(request: Request) -> Any:
                         yield _sse(_norm_chunk(chunk, cid, created, model))
                     yield "data: [DONE]\n\n"
                     credit = ledger.record(model, usage)
-                    pool.release(acc, tokens=(usage or {}).get("total_tokens", 0),
-                                 credits=credit)
+                    tk = (usage or {}).get("total_tokens", 0)
+                    pool.release(acc, tokens=tk, credits=credit)
+                    _log_call(request, model=model, ok=True, endpoint="chat", t0=t0,
+                              tokens=tk, credits=credit, account=acc.masked(), stream=True,
+                              t_first=t_first,
+                              out_tokens=(usage or {}).get("completion_tokens", 0))
                 except Exception as exc:  # noqa: BLE001
                     pool.release(acc, error=str(exc)[:200])
+                    _log_call(request, model=model, ok=False, endpoint="chat", t0=t0,
+                              account=acc.masked(), error=str(exc)[:200], stream=True)
                     yield _sse({"error": {"message": str(exc)[:200], "type": "upstream_error"}})
                     yield "data: [DONE]\n\n"
 
@@ -248,10 +313,16 @@ async def chat_completions(request: Request) -> Any:
                         finish = ch["finish_reason"]
         except Exception as exc:  # noqa: BLE001
             pool.release(acc, error=str(exc)[:200])
+            _log_call(request, model=model, ok=False, endpoint="chat", t0=t0,
+                      account=acc.masked(), error=str(exc)[:200])
             raise HTTPException(502, f"上游流中断: {exc}"[:200])
 
         credit = ledger.record(model, usage)
-        pool.release(acc, tokens=(usage or {}).get("total_tokens", 0), credits=credit)
+        tk = (usage or {}).get("total_tokens", 0)
+        pool.release(acc, tokens=tk, credits=credit)
+        _log_call(request, model=model, ok=True, endpoint="chat", t0=t0,
+                  tokens=tk, credits=credit, account=acc.masked(),
+                  t_first=t_first, out_tokens=(usage or {}).get("completion_tokens", 0))
         msg: dict[str, Any] = {"role": "assistant", "content": content}
         if reasoning:
             msg["reasoning_content"] = reasoning
@@ -329,12 +400,16 @@ async def anthropic_messages(request: Request) -> Any:
     )
     proxy = pm.pick()
     mid = f"msg_{uuid.uuid4().hex[:24]}"
+    t0 = time.time()
 
     try:
         gen = upstream.stream_chat(acc.access_token, payload, proxy=proxy)
         first = next(gen)
+        t_first = time.time()
     except upstream.UpstreamError as exc:
         pool.release(acc, error=f"{exc.code}: {exc.msg}")
+        _log_call(request, model=model, ok=False, endpoint="messages", t0=t0,
+                  account=acc.masked(), code=exc.code, error=exc.msg, stream=want_stream)
         raise HTTPException(exc.status if exc.status >= 400 else 502,
                             {"type": "error", "error": {"type": "api_error", "message": exc.msg}})
     except Exception as exc:  # noqa: BLE001
@@ -343,6 +418,8 @@ async def anthropic_messages(request: Request) -> Any:
             pm.mark_bad(proxy)
         else:
             pool.release(acc, error=err)
+        _log_call(request, model=model, ok=False, endpoint="messages", t0=t0,
+                  account=acc.masked(), error=err, stream=want_stream)
         raise HTTPException(502, f"上游失败: {err}")
 
     if want_stream:
@@ -368,8 +445,15 @@ async def anthropic_messages(request: Request) -> Any:
                                 ensure_ascii=False) + "\n\n")
                 pool.release(acc, tokens=(usage or {}).get("total_tokens", 0),
                              credits=ledger.record(model, usage))
+                _log_call(request, model=model, ok=True, endpoint="messages", t0=t0,
+                          tokens=(usage or {}).get("total_tokens", 0),
+                          credits=float((usage or {}).get("credit") or 0),
+                          account=acc.masked(), stream=True, t_first=t_first,
+                          out_tokens=(usage or {}).get("completion_tokens", 0))
             except Exception as exc:  # noqa: BLE001
                 pool.release(acc, error=str(exc)[:200])
+                _log_call(request, model=model, ok=False, endpoint="messages", t0=t0,
+                          account=acc.masked(), error=str(exc)[:200], stream=True)
             yield "event: content_block_stop\ndata: " + json.dumps(
                 {"type": "content_block_stop", "index": 0}) + "\n\n"
             yield ("event: message_delta\ndata: " + json.dumps({
@@ -390,9 +474,15 @@ async def anthropic_messages(request: Request) -> Any:
                 text += (ch.get("delta") or {}).get("content") or ""
     except Exception as exc:  # noqa: BLE001
         pool.release(acc, error=str(exc)[:200])
+        _log_call(request, model=model, ok=False, endpoint="messages", t0=t0,
+                  account=acc.masked(), error=str(exc)[:200])
         raise HTTPException(502, f"上游流中断: {exc}"[:200])
-    pool.release(acc, tokens=(usage or {}).get("total_tokens", 0),
-                 credits=ledger.record(model, usage))
+    credit = ledger.record(model, usage)
+    pool.release(acc, tokens=(usage or {}).get("total_tokens", 0), credits=credit)
+    _log_call(request, model=model, ok=True, endpoint="messages", t0=t0,
+              tokens=(usage or {}).get("total_tokens", 0), credits=credit,
+              account=acc.masked(), t_first=t_first,
+              out_tokens=(usage or {}).get("completion_tokens", 0))
     return {
         "id": mid, "type": "message", "role": "assistant", "model": model,
         "content": [{"type": "text", "text": text}],
@@ -406,9 +496,164 @@ async def anthropic_messages(request: Request) -> Any:
 # 管理 API
 # --------------------------------------------------------------------------- #
 @app.get("/api/health")
-def health() -> dict[str, Any]:
-    return {"ok": True, "stats": pool.stats(), "proxy_mode": pm.mode,
-            "api_key_required": bool(API_KEY), "time": time.strftime("%Y-%m-%d %H:%M:%S")}
+def health(wb_session: str | None = Cookie(None, alias=COOKIE_NAME),
+           authorization: str | None = Header(None),
+           x_api_key: str | None = Header(None, alias="x-api-key")) -> dict[str, Any]:
+    """存活探针公开；账号数/积分这些只在已登录时给，避免裸奔泄露池子规模。"""
+    base = {"ok": True, "time": time.strftime("%Y-%m-%d %H:%M:%S")}
+    authed = bool(webauth.session(wb_session or "")) or (
+        bool(ADMIN_KEY) and _extract_key(authorization, x_api_key) == ADMIN_KEY)
+    if not authed:
+        return {**base, "authed": False}
+    return {**base, "authed": True, "stats": pool.stats(), "proxy_mode": pm.mode,
+            "api_key_required": keystore.has_any()}
+
+
+# --------------------------------------------------------------------------- #
+# 登录 / 会话
+# --------------------------------------------------------------------------- #
+def _cookie_secure(request: Request) -> bool:
+    if COOKIE_SECURE == "on":
+        return True
+    if COOKIE_SECURE == "off":
+        return False
+    # auto：跟随当前请求的协议（经 1Panel/openresty 反代时看 X-Forwarded-Proto）
+    xf = (request.headers.get("x-forwarded-proto") or "").split(",")[0].strip().lower()
+    return (xf or request.url.scheme) == "https"
+
+
+@app.get("/api/auth/state")
+def auth_state(request: Request,
+               wb_session: str | None = Cookie(None, alias=COOKIE_NAME)) -> dict[str, Any]:
+    """未登录也能调：前端据此决定显示登录页还是主界面。"""
+    s = webauth.session(wb_session or "")
+    return {
+        "logged_in": bool(s),
+        "user": (s or {}).get("user"),
+        "default_password": webauth.uses_default_password(),
+        "users": len(webauth.users()),
+    }
+
+
+@app.post("/api/auth/login")
+async def auth_login(request: Request, response: Response) -> dict[str, Any]:
+    body = await request.json()
+    user = str(body.get("user") or "").strip()
+    pwd = str(body.get("password") or "")
+    tok = webauth.login(user, pwd, ua=request.headers.get("user-agent", ""))
+    if not tok:
+        raise HTTPException(401, "用户名或密码不对")
+    response.set_cookie(COOKIE_NAME, tok, max_age=SESSION_TTL, httponly=True,
+                        samesite="lax", secure=_cookie_secure(request), path="/")
+    return {"ok": True, "user": user,
+            "default_password": webauth.uses_default_password()}
+
+
+@app.post("/api/auth/logout")
+def auth_logout(response: Response,
+                wb_session: str | None = Cookie(None, alias=COOKIE_NAME)) -> dict[str, Any]:
+    webauth.logout(wb_session or "")
+    response.delete_cookie(COOKIE_NAME, path="/")
+    return {"ok": True}
+
+
+@app.post("/api/auth/password")
+async def auth_password(request: Request, response: Response,
+                        user: str = Depends(require_admin)) -> dict[str, Any]:
+    body = await request.json()
+    target = user if user != "admin-key" else str(body.get("user") or "").strip()
+    if not target:
+        raise HTTPException(400, "缺少用户名")
+    ok, msg = webauth.change_password(target, str(body.get("old") or ""),
+                                      str(body.get("new") or ""))
+    if not ok:
+        raise HTTPException(400, msg)
+    response.delete_cookie(COOKIE_NAME, path="/")
+    return {"ok": True, "message": "密码已改，请重新登录"}
+
+
+# --------------------------------------------------------------------------- #
+# API Key 管理
+# --------------------------------------------------------------------------- #
+@app.get("/api/keys", dependencies=[Depends(require_admin)])
+def api_keys_list() -> dict[str, Any]:
+    return {"keys": keystore.public_list(), "prefix_note": "调用时作 Bearer token 或 x-api-key"}
+
+
+@app.post("/api/keys", dependencies=[Depends(require_admin)])
+async def api_keys_create(request: Request) -> dict[str, Any]:
+    try:
+        body = await request.json()
+    except Exception:  # noqa: BLE001
+        body = {}
+    rec = keystore.create(name=str(body.get("name") or ""), note=str(body.get("note") or ""))
+    # 明文只在这里返回一次，前端负责让用户复制
+    return {"ok": True, "id": rec["id"], "name": rec["name"], "key": rec["key"]}
+
+
+@app.post("/api/keys/{kid}/update", dependencies=[Depends(require_admin)])
+async def api_keys_update(kid: str, request: Request) -> dict[str, Any]:
+    body = await request.json()
+    if kid == "env":
+        raise HTTPException(400, "环境变量里的 key 只能改 .env")
+    ok = keystore.update(kid, name=body.get("name"), enabled=body.get("enabled"),
+                         note=body.get("note"))
+    if not ok:
+        raise HTTPException(404, "key 不存在")
+    return {"ok": True}
+
+
+@app.post("/api/keys/{kid}/rotate", dependencies=[Depends(require_admin)])
+def api_keys_rotate(kid: str) -> dict[str, Any]:
+    if kid == "env":
+        raise HTTPException(400, "环境变量里的 key 只能改 .env")
+    nk = keystore.rotate(kid)
+    if not nk:
+        raise HTTPException(404, "key 不存在")
+    return {"ok": True, "key": nk}
+
+
+@app.get("/api/keys/{kid}/reveal", dependencies=[Depends(require_admin)])
+def api_keys_reveal(kid: str) -> dict[str, Any]:
+    k = keystore.reveal(kid)
+    if not k:
+        raise HTTPException(404, "key 不存在")
+    return {"ok": True, "key": k}
+
+
+@app.delete("/api/keys/{kid}", dependencies=[Depends(require_admin)])
+def api_keys_delete(kid: str) -> dict[str, Any]:
+    if kid == "env":
+        raise HTTPException(400, "环境变量里的 key 只能改 .env")
+    if not keystore.delete(kid):
+        raise HTTPException(404, "key 不存在")
+    return {"ok": True}
+
+
+# --------------------------------------------------------------------------- #
+# 调用日志 / 模型可用性
+# --------------------------------------------------------------------------- #
+@app.get("/api/calls/health", dependencies=[Depends(require_admin)])
+def api_calls_health(window_h: int = 24, buckets: int = 24,
+                     include_known: bool = True) -> dict[str, Any]:
+    known: list[str] = []
+    if include_known:
+        try:
+            known = [m["id"] for m in (probe_models().get("models") or [])]
+        except Exception:  # noqa: BLE001
+            known = []
+    return calllog.health(window_h=window_h, buckets=buckets, known_models=known)
+
+
+@app.get("/api/calls/recent", dependencies=[Depends(require_admin)])
+def api_calls_recent(limit: int = 80) -> dict[str, Any]:
+    return {"calls": calllog.recent(limit=max(1, min(500, limit)))}
+
+
+@app.post("/api/calls/reset", dependencies=[Depends(require_admin)])
+def api_calls_reset() -> dict[str, Any]:
+    calllog.reset()
+    return {"ok": True}
 
 
 @app.get("/api/pool", dependencies=[Depends(require_admin)])
@@ -896,9 +1141,28 @@ if STATIC_DIR.exists():
     app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
 
+def _asset_ver() -> str:
+    """按 app.css / app.js 的 mtime 生成版本号。
+
+    StaticFiles 只发 ETag/Last-Modified，浏览器（尤其带 SW 或强缓存的）改完前端
+    还会拿旧文件，看着像"改了没生效"。给 URL 带上随文件变化的 v= 参数，
+    发版后第一次请求必然 miss，不用叫用户清缓存。
+    """
+    ts = 0.0
+    for name in ("app.css", "app.js"):
+        f = STATIC_DIR / name
+        if f.exists():
+            ts = max(ts, f.stat().st_mtime)
+    return hex(int(ts))[2:] or "0"
+
+
 @app.get("/", response_class=HTMLResponse)
 def index() -> HTMLResponse:
     f = STATIC_DIR / "index.html"
     if f.exists():
-        return HTMLResponse(f.read_text(encoding="utf-8"))
+        html = f.read_text(encoding="utf-8")
+        v = _asset_ver()
+        html = (html.replace("/static/app.css", f"/static/app.css?v={v}")
+                    .replace("/static/app.js", f"/static/app.js?v={v}"))
+        return HTMLResponse(html, headers={"Cache-Control": "no-store"})
     return HTMLResponse("<h1>wb-pool</h1><p>WebUI 未安装</p>")

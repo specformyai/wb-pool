@@ -211,40 +211,56 @@ def extract_code(content: str) -> str | None:
     return m.group(1) if m else None
 
 
-def get_sms(token: str, phone: str, timeout_s: int = 300,
+def get_sms(token: str, phone: str, timeout_s: int = 180,
             poll_interval: int = 5) -> dict[str, Any]:
     """
-    等待腾讯验证码短信，最多 timeout_s 秒。
-    返回 {"ok": True, "code": "123456", "raw": "全文"} 或 {"ok": False, "error": "..."}
+    等待腾讯验证码短信（getMsg 直查 + 余额监控双保险）。
+    返回 {"ok": True, "code": "123456", "raw": "全文", "method": "getMsg"|"balance"}
+    或 {"ok": False, "error": "..."}
 
-    数据来源是 _SmsCache 共享快照（后台每 65s 拉一次 queryUsed），
-    因此这里可以用 5s 的短间隔轮询本地缓存，既灵敏又不触发平台限速。
+    策略：
+      1. getMsg 直查这个号（不走 queryUsed 避免限速风险）
+      2. 同时监控余额变化（接码平台按实际收信扣费，余额变化=收到了）
+      3. 两者任一判定收到即返回
     """
     target = _normalize(phone)
-    _CACHE.ensure_running(token)
-
     deadline = time.time() + timeout_s
-    last_error = ""
+
+    # 记录初始余额
+    balance_start = balance(token)
+    balance_float = float(balance_start) if isinstance(balance_start, (int, float)) else None
+
     while time.time() < deadline:
-        records, last_ok, last_error = _CACHE.snapshot()
-        if last_ok:
-            for rec in records:
-                rp = rec["phone"]
-                if not rp or not target:
-                    continue
-                if not (rp.endswith(target) or target.endswith(rp)):
-                    continue
-                if KEYWORD not in rec["content"]:
-                    continue
-                code = extract_code(rec["content"])
+        # 方法1: getMsg 直查
+        try:
+            raw = _call(token, {"code": "getMsg", "phone": phone, "keyWord": KEYWORD}, timeout=10)
+            if raw and "[尚未收到]" not in raw and "ERROR" not in raw:
+                code = extract_code(raw)
                 if code:
-                    return {"ok": True, "code": code, "raw": rec["content"]}
+                    return {"ok": True, "code": code, "raw": raw, "method": "getMsg"}
+        except Exception:
+            pass
+
+        # 方法2: 余额监控（收到短信会扣费，余额减少=收到了）
+        if balance_float is not None:
+            try:
+                balance_now = balance(token)
+                if isinstance(balance_now, (int, float)):
+                    if balance_now < balance_float:
+                        # 余额减少，说明收到了，但 getMsg 可能还没更新，再试一次
+                        time.sleep(2)
+                        raw = _call(token, {"code": "getMsg", "phone": phone, "keyWord": KEYWORD}, timeout=10)
+                        code = extract_code(raw) if raw and "[尚未收到]" not in raw else None
+                        if code:
+                            return {"ok": True, "code": code, "raw": raw, "method": "balance+getMsg"}
+                        # 余额变了但取不到内容，标记异常但继续等
+                        balance_float = balance_now
+            except Exception:
+                pass
+
         time.sleep(poll_interval)
 
-    err = f"等待 {timeout_s}s 未收到验证码"
-    if last_error:
-        err += f"（queryUsed 最近错误: {last_error}）"
-    return {"ok": False, "error": err}
+    return {"ok": False, "error": f"等待 {timeout_s}s 未收到验证码（getMsg 直查 + 余额监控均无变化）"}
 
 
 def release(token: str, phone: str) -> str:
