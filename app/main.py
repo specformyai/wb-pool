@@ -32,7 +32,8 @@ from .pool import Account, AccountPool
 from .proxies import DEFAULT_EXITS, ProxyManager, is_proxy_error
 from .register import Registrar
 from .auto_register import AutoRegistrar
-from .upstream_sync import (STATIC_MODELS, is_cache_expired, in_fail_cooldown,
+from .upstream_sync import (STATIC_MODELS, static_models, merge_unlisted,
+                            is_cache_expired, in_fail_cooldown,
                             load_models_cache as load_sync_cache, resolve_models,
                             sync_models_from_upstream, to_openai_data, vendor_of)
 
@@ -104,7 +105,8 @@ def probe_models(force: bool = False) -> dict[str, Any]:
     """
     cache = load_sync_cache(MODELS_CACHE)
     if not force and cache["models"] and not is_cache_expired(MODELS_CACHE):
-        return {"models": cache["models"], "source": cache.get("source") or "cache",
+        # 缓存是 console 返回的 11 项，漏网模型（glm-5.3 等）要在读的时候并进来
+        return {"models": merge_unlisted(cache["models"]), "source": cache.get("source") or "cache",
                 "probed_at": cache.get("timestamp"), "error": None}
     if not force and in_fail_cooldown(cache):
         models, source = resolve_models(MODELS_CACHE)
@@ -836,8 +838,8 @@ def api_models_cache_status() -> dict[str, Any]:
             "exists": False,
             "expired": True,
             "source": "static",
-            "available_count": len(STATIC_MODELS),
-            "static_fallback_count": len(STATIC_MODELS),
+            "available_count": len(static_models()),
+            "static_fallback_count": len(static_models()),
             "message": "缓存不存在，/v1/models 走静态兜底表，可点同步",
         }
     
@@ -852,7 +854,7 @@ def api_models_cache_status() -> dict[str, Any]:
             "age_hours": round((time.time() - data.get("timestamp", 0)) / 3600, 1),
             "last_error": data.get("last_error"),
             "in_fail_cooldown": in_fail_cooldown(data),
-            "static_fallback_count": len(STATIC_MODELS),
+            "static_fallback_count": len(static_models()),
         }
     except Exception as e:
         return {

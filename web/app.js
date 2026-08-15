@@ -403,6 +403,7 @@ async function loadModels(force) {
         ${x.ctx ? `<span class="tag">${fmtCtx(x.ctx)} ctx</span>` : ''}
         ${x.max_output_tokens ? `<span class="tag">${fmtCtx(x.max_output_tokens)} out</span>` : ''}
         ${mult ? `<span class="tag rate">${mult}</span>` : ''}
+        ${x.unlisted ? `<span class="tag unlisted" title="官方 console 模型表未列出，实测可正常调用">官方未列</span>` : ''}
       </div>
       ${caps.length ? `<div class="model-caps">${caps.map(([ic, t]) =>
         `<span class="cap"><i data-lucide="${ic}"></i>${t}</span>`).join('')}</div>` : ''}

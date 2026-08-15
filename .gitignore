@@ -29,3 +29,10 @@ pool_analysis.py
 /app.js
 /index.html
 *.tar.gz
+ab_test_*.py
+control_test.py
+e2e_*.py
+retest_*.py
+scan_*.py
+verify_*.py
+probe_*.py

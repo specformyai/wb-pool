@@ -392,3 +392,4 @@ td.err-cell{max-width:220px;font-size:11.5px;color:#ffa8b2;overflow:hidden;
   .invite-grid{grid-template-columns:1fr}
   .inv-stats{gap:8px;font-size:11px}
 }
+.tag.unlisted{color:var(--acc2);background:rgba(160,120,255,.13);border:1px solid rgba(160,120,255,.26)}

@@ -73,6 +73,50 @@ def vendor_of(model_id: str) -> str:
 
 
 # --------------------------------------------------------------------------- #
+# console 未列但实测可调的"漏网"模型
+# --------------------------------------------------------------------------- #
+# console 接口（含全量 23 项表）里**都没有**这几个 id，但直接 chat 能通。
+# 实测 2026-08-15，对照实验排除了"碰巧"与"报错模式相同"的误判：
+#   glm-5.3    同一 active 账号连续 3/3 成功；两个 active 账号各 1/1 成功
+#   kimi-k3    / kimi-k3-2  均成功出内容（首轮 max_tokens=8 判不出，是因为思考
+#              模型把输出全放 reasoning_content，content 为空 —— 不是不可用）
+#   对照组 glm-4.7 / glm-4.6（在全量 23 项表里但不在 cli 白名单）与编造的
+#              glm-9.9-fake 一律 400 code=11102 "service info not found"
+#   disabled 账号打已知可用的 glm-5.2 也是 403 code=11140，证明跨账号失败是
+#              账号被禁所致，与模型无关
+#
+# ctx / max_output_tokens 取**平台同门模型的实际上限**，不取 models.dev 的原生上限：
+# 平台会自己压低 output（glm-5.2 原生 131072 → 平台 48000；kimi-k3-1 → 32000），
+# 照原生值发会让客户端要到超限的 max_tokens。
+UNLISTED_MODELS: list[dict[str, Any]] = [
+    {"id": "glm-5.3", "name": "GLM-5.3", "ctx": 1000000, "max_output_tokens": 48000,
+     "desc": "官方 console 未列，实测可调。GLM 旗舰（2026-08-14 发布），长程编码/Agent 向",
+     "supports_images": False, "supports_tool_call": True, "supports_reasoning": True,
+     "credits": None, "unlisted": True},
+    {"id": "kimi-k3", "name": "Kimi-K3", "ctx": 1000000, "max_output_tokens": 32000,
+     "desc": "官方 console 未列，实测可调。Kimi 当前最新代（console 只给了 kimi-k3-1 快照）",
+     "supports_images": True, "supports_tool_call": True, "supports_reasoning": True,
+     "credits": None, "unlisted": True},
+    {"id": "kimi-k3-2", "name": "Kimi-K3-2", "ctx": 1000000, "max_output_tokens": 32000,
+     "desc": "官方 console 未列，实测可调。kimi-k3 的另一个平台快照",
+     "supports_images": True, "supports_tool_call": True, "supports_reasoning": True,
+     "credits": None, "unlisted": True},
+]
+
+
+def merge_unlisted(models: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """把漏网模型并进清单（已存在的 id 不覆盖）。"""
+    have = {m.get("id") for m in models}
+    return list(models) + [dict(m, vendor_label=vendor_of(m["id"]))
+                           for m in UNLISTED_MODELS if m["id"] not in have]
+
+
+def static_models() -> list[dict[str, Any]]:
+    """静态兜底全量（console 11 项 + 漏网 3 项）。"""
+    return merge_unlisted([dict(m, vendor_label=vendor_of(m["id"])) for m in STATIC_MODELS])
+
+
+# --------------------------------------------------------------------------- #
 # 缓存读写
 # --------------------------------------------------------------------------- #
 def _empty() -> dict[str, Any]:
@@ -148,7 +192,7 @@ def sync_models_from_upstream(token: str, proxy: str | None = None,
             save_models_cache(cache_path, out)
         return out
 
-    models = res["models"]
+    models = merge_unlisted(res["models"])
     for m in models:
         m.setdefault("vendor_label", vendor_of(m["id"]))
     out = {
@@ -174,8 +218,9 @@ def resolve_models(cache_path: Path) -> tuple[list[dict[str, Any]], str]:
     """
     cache = load_models_cache(cache_path)
     if cache["models"]:
-        return cache["models"], cache.get("source") or "cache"
-    return [dict(m, vendor_label=vendor_of(m["id"])) for m in STATIC_MODELS], "static"
+        # 老缓存（本次改动之前落的）没有漏网模型，读的时候补上
+        return merge_unlisted(cache["models"]), cache.get("source") or "cache"
+    return static_models(), "static"
 
 
 def to_openai_data(models: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -196,7 +241,7 @@ def to_openai_data(models: list[dict[str, Any]]) -> list[dict[str, Any]]:
             "display_name": m.get("name") or mid,
         }
         for k in ("credits", "desc", "supports_images", "supports_tool_call",
-                  "supports_reasoning", "is_default"):
+                  "supports_reasoning", "is_default", "unlisted"):
             if m.get(k) is not None:
                 entry[k] = m[k]
         out.append(entry)
