@@ -402,9 +402,14 @@
       </div>
     </div>
     <div class="chat-log" id="chatLog"></div>
-    <div class="chat-input">
-      <textarea id="chatInput" rows="2" placeholder="输入消息，Ctrl+Enter 发送"></textarea>
-      <button class="btn primary" id="btnChatSend" title="发送"><i data-lucide="send-horizontal"></i></button>
+    <div class="chat-attachments" id="chatAttachments" hidden></div>
+    <div class="chat-input" id="chatDropZone">
+      <input id="chatImageInput" type="file" accept="image/png,image/jpeg,image/webp,image/gif" multiple hidden>
+      <button class="btn ghost chat-image-btn" id="btnChatImage" type="button" title="添加图片" aria-label="添加图片">
+        <i data-lucide="image-plus"></i>
+      </button>
+      <textarea id="chatInput" rows="2" placeholder="输入消息，支持粘贴或拖入图片，Ctrl+Enter 发送"></textarea>
+      <button class="btn primary" id="btnChatSend" type="button" title="发送" aria-label="发送"><i data-lucide="send-horizontal"></i></button>
     </div>
     <div class="chat-meta" id="chatMeta">单次调试最长等待 120 秒，发送后可随时手动停止</div>
   </div>
@@ -478,6 +483,7 @@
 
 <div class="toast-host" id="toastHost"></div>
 <script src="https://unpkg.com/lucide@latest/dist/umd/lucide.js"></script>
+<script src="/static/chat-utils.js"></script>
 <script src="/static/app.js"></script>
 </body>
 </html>

@@ -1,7 +1,7 @@
 /* wb-pool WebUI */
 const $ = s => document.querySelector(s);
 const $$ = s => [...document.querySelectorAll(s)];
-let MODELS = [];
+let MODELS = [], MODEL_DETAILS = [];
 let regSession = null, regTimer = null;
 let ME = null;                                     // 当前登录用户
 let HIDE_DEAD = localStorage.getItem('wbpool_hide_dead') === '1';
@@ -9,6 +9,9 @@ let HEALTH_WIN = Number(localStorage.getItem('wbpool_health_win') || 24);
 const VISIBLE_PHONES = new Set();                  // 仅当前页面临时显示，刷新后重新隐藏
 const CHAT_TIMEOUT_MS = 120000;
 let chatController = null, chatAbortReason = '', chatActiveBody = null;
+let chatImages = [];
+const MAX_CHAT_IMAGES = 4;
+const MAX_CHAT_IMAGE_BYTES = 10 * 1024 * 1024;
 
 const icons = () => window.lucide && lucide.createIcons();
 
@@ -679,6 +682,7 @@ async function loadModels(force) {
   if (!d) return;
   MODELS = d.models || [];
   const rows = d.details || [];
+  MODEL_DETAILS = rows;
 
   const src = d.source || 'cache';
   const when = d.probed_at ? new Date(d.probed_at * 1000).toLocaleString('zh-CN', { hour12: false }) : '—';
@@ -784,16 +788,109 @@ $('#btnProxyMode').onclick = e => run(e.currentTarget, async () => {
 });
 
 /* ---------- chat ---------- */
-function addMsg(role, text = '') {
+const chatMarkdown = text => WBChatUtils.renderMarkdown(text);
+const chatContent = (text, images) => WBChatUtils.buildMessageContent(text, images);
+
+function renderBotBody(body, text = '', think = '', cursor = false) {
+  body.innerHTML = (think ? `<div class="msg-think">${WBChatUtils.escapeHtml(think)}</div>` : '') +
+    `<div class="msg-md">${chatMarkdown(text)}</div>` +
+    (cursor ? '<span class="cursor"></span>' : '');
+}
+
+function addMsg(role, text = '', images = []) {
   const d = document.createElement('div');
   d.className = `msg ${role}`;
   d.innerHTML = `<div class="msg-av"><i data-lucide="${role === 'user' ? 'user' : 'sparkles'}"></i></div>
                  <div class="msg-body"></div>`;
   $('#chatLog').appendChild(d);
-  d.querySelector('.msg-body').textContent = text;
+  const body = d.querySelector('.msg-body');
+  if (role === 'bot') renderBotBody(body, text);
+  else {
+    if (text) {
+      const copy = document.createElement('div');
+      copy.className = 'msg-text';
+      copy.textContent = text;
+      body.appendChild(copy);
+    }
+    if (images.length) {
+      const gallery = document.createElement('div');
+      gallery.className = 'msg-images';
+      for (const image of images) {
+        const img = document.createElement('img');
+        img.src = image.dataUrl;
+        img.alt = image.name || '已发送图片';
+        img.loading = 'lazy';
+        gallery.appendChild(img);
+      }
+      body.appendChild(gallery);
+    }
+  }
   icons();
   $('#chatLog').scrollTop = $('#chatLog').scrollHeight;
-  return d.querySelector('.msg-body');
+  return body;
+}
+
+const formatImageSize = bytes => bytes < 1024 * 1024
+  ? `${Math.max(1, Math.round(bytes / 1024))} KB`
+  : `${(bytes / 1024 / 1024).toFixed(1)} MB`;
+
+function renderChatAttachments() {
+  const box = $('#chatAttachments');
+  box.replaceChildren();
+  box.hidden = chatImages.length === 0;
+  chatImages.forEach((image, index) => {
+    const item = document.createElement('div');
+    item.className = 'chat-attachment';
+    item.innerHTML = '<img alt=""><div class="chat-attachment-info"><strong></strong><span></span></div>' +
+      '<button type="button" class="mini" aria-label="移除图片" title="移除图片"><i data-lucide="x"></i></button>';
+    const preview = item.querySelector('img');
+    preview.src = image.dataUrl;
+    preview.alt = image.name;
+    item.querySelector('strong').textContent = image.name;
+    item.querySelector('span').textContent = formatImageSize(image.size);
+    item.querySelector('button').onclick = () => {
+      chatImages.splice(index, 1);
+      renderChatAttachments();
+    };
+    box.appendChild(item);
+  });
+  icons();
+}
+
+function clearChatImages() {
+  chatImages = [];
+  $('#chatImageInput').value = '';
+  renderChatAttachments();
+}
+
+function readImage(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve({
+      name: file.name || 'image', type: file.type, size: file.size,
+      dataUrl: String(reader.result || ''),
+    });
+    reader.onerror = () => reject(new Error(`读取图片失败：${file.name || '未知文件'}`));
+    reader.readAsDataURL(file);
+  });
+}
+
+async function addChatFiles(fileList) {
+  const files = [...(fileList || [])];
+  for (const file of files) {
+    if (chatImages.length >= MAX_CHAT_IMAGES) {
+      toast(`一次最多发送 ${MAX_CHAT_IMAGES} 张图片`, 'err'); break;
+    }
+    if (!/^image\/(png|jpeg|webp|gif)$/i.test(file.type || '')) {
+      toast(`不支持 ${file.name || '该文件'}，请选择 PNG、JPG、WebP 或 GIF`, 'err'); continue;
+    }
+    if (file.size > MAX_CHAT_IMAGE_BYTES) {
+      toast(`${file.name} 超过 10 MB`, 'err'); continue;
+    }
+    try { chatImages.push(await readImage(file)); }
+    catch (e) { toast(e.message, 'err'); }
+  }
+  renderChatAttachments();
 }
 function paintChatButton(running) {
   const btn = $('#btnChatSend');
@@ -832,6 +929,7 @@ function stopChat(reason = 'manual') {
 $('#btnChatClear').onclick = () => {
   if (chatController) stopChat('manual');
   $('#chatLog').innerHTML = '';
+  clearChatImages();
   $('#chatMeta').textContent = '单次调试最长等待 120 秒，发送后可随时手动停止';
 };
 
@@ -850,12 +948,19 @@ async function loadChatAccounts() {
 async function send() {
   if (chatController) { stopChat('manual'); return; }
   const inp = $('#chatInput'), text = inp.value.trim();
-  if (!text) return;
+  if (!text && !chatImages.length) return;
   const model = $('#chatModel').value || 'default';
   const stream = $('#chatStream').checked;
-  addMsg('user', text); inp.value = '';
+  const detail = MODEL_DETAILS.find(x => x.id === model);
+  if (chatImages.length && detail && detail.supports_images === false) {
+    toast('当前模型不支持图片，请选择带“图像”能力标记的模型', 'err');
+    return;
+  }
+  const images = chatImages.map(image => ({ ...image }));
+  const content = chatContent(text, images);
+  addMsg('user', text, images); inp.value = ''; clearChatImages();
   const body = addMsg('bot', '');
-  body.innerHTML = '<span class="cursor"></span>';
+  renderBotBody(body, '', '', true);
   const t0 = performance.now();
   const controller = new AbortController();
   chatController = controller;
@@ -877,7 +982,7 @@ async function send() {
     const r = await fetch('/api/chat/completions', {
       method: 'POST', headers: h,
       credentials: 'same-origin',
-      body: JSON.stringify({ model, messages: [{ role: 'user', content: text }], stream }),
+      body: JSON.stringify({ model, messages: [{ role: 'user', content }], stream }),
       signal: controller.signal,
     });
     const acct = r.headers.get('X-WB-Account') || '';
@@ -908,8 +1013,7 @@ async function send() {
             if (d.reasoning_content) think += d.reasoning_content;
             if (d.content) { out += d.content; firstAt = firstAt ?? performance.now(); }
           }
-          body.innerHTML = (think ? `<div class="msg-think">${esc(think)}</div>` : '') +
-                           esc(out) + '<span class="cursor"></span>';
+          renderBotBody(body, out, think, true);
           $('#chatLog').scrollTop = $('#chatLog').scrollHeight;
         }
       }
@@ -918,7 +1022,7 @@ async function send() {
       const m = j.choices?.[0]?.message || {};
       out = m.content || ''; think = m.reasoning_content || ''; usage = j.usage;
     }
-    body.innerHTML = (think ? `<div class="msg-think">${esc(think)}</div>` : '') + esc(out);
+    renderBotBody(body, out, think);
     const dt = ((performance.now() - t0) / 1000).toFixed(2);
     const ttfb = firstAt ? ((firstAt - t0) / 1000).toFixed(2) : '—';
     $('#chatMeta').textContent =
@@ -949,8 +1053,29 @@ async function send() {
 }
 const esc = s => String(s).replace(/[<>&"]/g, c => ({ '<': '&lt;', '>': '&gt;', '&': '&amp;', '"': '&quot;' }[c]));
 $('#btnChatSend').onclick = () => chatController ? stopChat('manual') : send();
+$('#btnChatImage').onclick = () => $('#chatImageInput').click();
+$('#chatImageInput').addEventListener('change', e => addChatFiles(e.target.files));
 $('#chatInput').addEventListener('keydown', e => {
   if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); send(); }
+});
+$('#chatInput').addEventListener('paste', e => {
+  const images = [...(e.clipboardData?.files || [])].filter(file => file.type?.startsWith('image/'));
+  if (!images.length) return;
+  e.preventDefault();
+  addChatFiles(images);
+});
+const chatDropZone = $('#chatDropZone');
+['dragenter', 'dragover'].forEach(type => chatDropZone.addEventListener(type, e => {
+  e.preventDefault();
+  chatDropZone.classList.add('dragging');
+}));
+['dragleave', 'dragend'].forEach(type => chatDropZone.addEventListener(type, () => {
+  chatDropZone.classList.remove('dragging');
+}));
+chatDropZone.addEventListener('drop', e => {
+  e.preventDefault();
+  chatDropZone.classList.remove('dragging');
+  addChatFiles(e.dataTransfer?.files);
 });
 
 /* ---------- API 密钥 ---------- */

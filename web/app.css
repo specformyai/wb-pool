@@ -308,17 +308,63 @@ td.err-cell{max-width:220px;font-size:11.5px;color:#ffa8b2;overflow:hidden;
 .msg.bot .msg-av{background:linear-gradient(135deg,var(--acc),var(--acc2))}
 .msg-av svg{width:15px;height:15px;stroke:#fff}
 .msg.user .msg-av svg{stroke:var(--txt2)}
-.msg-body{flex:1;min-width:0;font-size:13.5px;line-height:1.72;white-space:pre-wrap;
+.msg-body{flex:1;min-width:0;font-size:13.5px;line-height:1.72;
   word-break:break-word;padding-top:4px}
 .msg.bot .msg-body{color:#dfe4f0}
+.msg-text{white-space:pre-wrap}
+.msg-md:empty{display:none}
+.msg-md>*:first-child{margin-top:0}.msg-md>*:last-child{margin-bottom:0}
+.msg-md p{margin:0 0 10px}
+.msg-md h1,.msg-md h2,.msg-md h3,.msg-md h4,.msg-md h5,.msg-md h6{
+  color:#f3f5fb;font-weight:650;line-height:1.35;margin:18px 0 9px;letter-spacing:-.015em}
+.msg-md h1{font-size:1.42em}.msg-md h2{font-size:1.28em}.msg-md h3{font-size:1.15em}
+.msg-md h4,.msg-md h5,.msg-md h6{font-size:1.03em}
+.msg-md strong{color:#fff;font-weight:700}.msg-md em{color:#e6e9f4}
+.msg-md del{color:var(--txt3)}
+.msg-md ul,.msg-md ol{margin:7px 0 11px;padding-left:24px}
+.msg-md li{margin:4px 0;padding-left:2px}.msg-md li::marker{color:var(--acc)}
+.msg-md blockquote{margin:10px 0;padding:7px 12px;border-left:3px solid var(--acc);
+  color:var(--txt2);background:rgba(109,124,255,.07);border-radius:0 8px 8px 0}
+.msg-md a{color:#9ca8ff;text-decoration:none;border-bottom:1px solid rgba(156,168,255,.38)}
+.msg-md a:hover{color:#c4cbff;border-color:currentColor}
+.msg-md code{font-family:"JetBrains Mono",ui-monospace,monospace;font-size:.9em;color:#d9ddff;
+  background:rgba(109,124,255,.12);border:1px solid rgba(109,124,255,.16);
+  border-radius:5px;padding:2px 5px}
+.msg-md pre{margin:11px 0;padding:13px 14px;overflow-x:auto;border-radius:10px;
+  background:#090b11;border:1px solid var(--line);line-height:1.62}
+.msg-md pre code{display:block;padding:0;border:0;background:none;color:#d7dbea;font-size:12px;
+  white-space:pre;word-break:normal}
+.msg-md hr{height:1px;border:0;background:var(--line2);margin:16px 0}
+.md-table-wrap{max-width:100%;overflow-x:auto;margin:11px 0;border:1px solid var(--line);border-radius:9px}
+.msg-md table{width:100%;border-collapse:collapse;font-size:12.5px;white-space:nowrap}
+.msg-md th,.msg-md td{padding:8px 11px;border-bottom:1px solid var(--line);text-align:left}
+.msg-md th{color:#fff;background:rgba(255,255,255,.045);font-weight:600}
+.msg-md tbody tr:last-child td{border-bottom:0}
 .msg-think{font-size:12px;color:var(--txt3);border-left:2px solid var(--line2);
   padding-left:11px;margin-bottom:9px;white-space:pre-wrap;font-style:italic}
 .cursor{display:inline-block;width:7px;height:15px;background:var(--acc);
   vertical-align:text-bottom;animation:blink 1s steps(2) infinite}
 @keyframes blink{50%{opacity:0}}
-.chat-input{display:flex;gap:10px;align-items:flex-end}
+.msg-images{display:grid;grid-template-columns:repeat(auto-fit,minmax(120px,220px));gap:8px;margin-top:9px}
+.msg-images img{display:block;width:100%;max-height:230px;object-fit:cover;border-radius:10px;
+  border:1px solid var(--line2);background:#090b11}
+.chat-attachments{display:flex;gap:9px;overflow-x:auto;margin:0 0 10px;padding:2px 1px 5px}
+.chat-attachment{display:flex;align-items:center;gap:9px;flex:0 0 220px;min-width:0;padding:7px;
+  border:1px solid var(--line);background:rgba(255,255,255,.035);border-radius:10px}
+.chat-attachment>img{width:42px;height:42px;object-fit:cover;border-radius:7px;background:#090b11;flex:0 0 auto}
+.chat-attachment-info{min-width:0;flex:1;display:flex;flex-direction:column;gap:2px}
+.chat-attachment-info strong{font-size:11.5px;font-weight:550;color:var(--txt);white-space:nowrap;
+  overflow:hidden;text-overflow:ellipsis}
+.chat-attachment-info span{font-size:10.5px;color:var(--txt3);font-family:"JetBrains Mono",monospace}
+.chat-attachment .mini{width:24px;height:24px;border:0;background:transparent}
+.chat-attachment .mini svg{width:13px;height:13px}
+.chat-input{display:flex;gap:10px;align-items:flex-end;border-radius:var(--r2);transition:.2s var(--ease)}
+.chat-input.dragging{box-shadow:0 0 0 3px rgba(109,124,255,.18)}
+.chat-input.dragging textarea{border-color:var(--acc);background:rgba(109,124,255,.08)}
 .chat-input textarea{flex:1}
 .chat-input .btn{height:42px;padding:0 17px}
+.chat-input .chat-image-btn{width:42px;padding:0;display:grid;place-items:center;flex:0 0 auto}
+.chat-input .chat-image-btn svg{width:17px;height:17px}
 .chat-meta{margin-top:11px;font-size:11.5px;color:var(--txt3);
   font-family:"JetBrains Mono",monospace}
 .msg-stop{margin-top:8px;padding:7px 10px;border-radius:8px;font-size:11.5px;
@@ -368,6 +414,8 @@ td.err-cell{max-width:220px;font-size:11.5px;color:#ffa8b2;overflow:hidden;
   main{padding:18px 14px}
   .code-input{font-size:19px;letter-spacing:6px;max-width:170px}
   .toast-host{left:14px;right:14px;bottom:14px;max-width:none}
+  .chat-input{gap:7px}.chat-input .btn{width:44px;padding:0;flex:0 0 44px}
+  .chat-attachment{flex-basis:190px}.msg-images{grid-template-columns:repeat(2,minmax(0,1fr))}
 }
 
 /* ---------- 邀请码 ---------- */
