@@ -871,12 +871,12 @@ async function send() {
   }, CHAT_TIMEOUT_MS);
 
   const h = { 'Content-Type': 'application/json', 'X-WB-Debug-Timeout': String(CHAT_TIMEOUT_MS / 1000) };
-  if (KEY) h['Authorization'] = `Bearer ${KEY}`;
   const forceAcc = ($('#chatAccount')?.value || '').trim();
   if (forceAcc) h['X-WB-Force-Account'] = forceAcc;
   try {
-    const r = await fetch('/v1/chat/completions', {
+    const r = await fetch('/api/chat/completions', {
       method: 'POST', headers: h,
+      credentials: 'same-origin',
       body: JSON.stringify({ model, messages: [{ role: 'user', content: text }], stream }),
       signal: controller.signal,
     });

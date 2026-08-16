@@ -14,6 +14,7 @@ import shutil
 import sys
 import tempfile
 import time
+from pathlib import Path
 TD = tempfile.mkdtemp(prefix="wbtest-")
 os.environ.update({
     "WB_DATA_DIR": TD, "WB_API_KEY": "", "WB_ADMIN_KEY": "",
@@ -92,6 +93,16 @@ with TestClient(app) as c:
     orig_stream = U.stream_chat
     M.upstream.stream_chat = fake_stream
     hdr = {"Authorization": f"Bearer {k1}"}
+    ck("登录 Cookie 可调用 WebUI 调试接口",
+       c.post("/api/chat/completions",
+              json={"model": "glm-5.3", "messages": [{"role": "user", "content": "hi"}]}).status_code == 200)
+    ck("/v1 chat 不接受登录 Cookie 代替 API key",
+       c.post("/v1/chat/completions",
+              json={"model": "glm-5.3", "messages": [{"role": "user", "content": "hi"}]}).status_code == 401)
+    anon = TestClient(M.app)
+    ck("未登录不能调用 WebUI 调试接口",
+       anon.post("/api/chat/completions",
+                 json={"model": "glm-5.3", "messages": [{"role": "user", "content": "hi"}]}).status_code == 401)
     r = c.post("/v1/chat/completions", headers=hdr,
                json={"model": "glm-5.3", "messages": [{"role": "user", "content": "hi"}]})
     ck("非流式 chat 200", r.status_code == 200, r.text[:200])
@@ -109,6 +120,16 @@ with TestClient(app) as c:
                json={"model": "boom-model", "messages": [{"role": "user", "content": "hi"}]})
     ck("上游报错 -> 5xx", r.status_code >= 400, r.status_code)
 
+    seed_acc.status = "active"; seed_acc.last_error = ""
+    r = c.post("/api/chat/completions", headers={"X-WB-Force-Account": seed_acc.phone},
+               json={"model": "boom-model", "messages": [{"role": "user", "content": "hi"}]})
+    ck("指定账号 11140 后标 dead", r.status_code >= 400 and seed_acc.status == "dead",
+       (r.status_code, seed_acc.status))
+
+    js = (Path(__file__).resolve().parents[1] / "web" / "app.js").read_text(encoding="utf-8")
+    ck("WebUI 调试走 session 接口且无残留 KEY",
+       "fetch('/api/chat/completions'" in js and "if (KEY)" not in js)
+
     ks = c.get("/api/keys").json()["keys"][0]
     ck("key 请求数已累计", ks["request_count"] >= 3, ks)
     ck("key token 数已累计", ks["tokens"] >= 20, ks)
@@ -116,7 +137,7 @@ with TestClient(app) as c:
     hh = c.get("/api/calls/health?include_known=false").json()
     mm = {x["model"]: x for x in hh["models"]}
     ck("日志记到 glm-5.3", mm.get("glm-5.3", {}).get("ok", 0) >= 3, list(mm))
-    ck("日志记到失败模型 boom-model", mm.get("boom-model", {}).get("fail", 0) == 1, mm.get("boom-model"))
+    ck("日志记到失败模型 boom-model", mm.get("boom-model", {}).get("fail", 0) == 2, mm.get("boom-model"))
     ck("boom-model 状态 bad", mm.get("boom-model", {}).get("state") == "bad", mm.get("boom-model"))
     rc = c.get("/api/calls/recent?limit=10").json()["calls"]
     ck("recent 带 key 名", any(x.get("key_name") == "cherry" for x in rc), rc[:2])

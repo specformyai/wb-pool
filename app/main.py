@@ -220,6 +220,7 @@ def _pick_account(force_key: str | None = None) -> Account:
     return acc
 
 
+@app.post("/api/chat/completions", dependencies=[Depends(require_admin)])
 @app.post("/v1/chat/completions", dependencies=[Depends(require_api)])
 async def chat_completions(request: Request) -> Any:
     body = await request.json()
@@ -266,6 +267,8 @@ async def chat_completions(request: Request) -> Any:
                       account=acc.masked(), code=exc.code, error=exc.msg,
                       stream=want_stream)
             if force_key:
+                # 指定账号调试也要落状态；否则持续 11140 的封禁号会一直显示 usable。
+                pool.release(acc, error=last_err)
                 raise HTTPException(502, {"error": {"message": last_err,
                                                     "code": exc.code,
                                                     "type": "upstream_error"}})
