@@ -193,6 +193,7 @@
     </div>
     <p class="hint">
       从 uoomsg 自动取实体卡号 → 腾讯发码 → 等收到验证码 → 自动入池。全程无需人工干预。
+      单任务超过 2 分 30 秒会自动停止并释放号码。
       <span id="uoomsgBalHint" style="margin-left:8px;color:var(--acc)"></span>
     </p>
     <div class="form-row">
@@ -206,6 +207,7 @@
     <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
       <button class="btn primary" id="btnAutoReg"><i data-lucide="play"></i>开始自动注册</button>
       <button class="btn ghost" id="btnAutoRegRefresh"><i data-lucide="refresh-cw"></i>刷新任务列表</button>
+      <button class="btn ghost" id="btnAutoRegClear"><i data-lucide="list-x"></i>清空已结束</button>
     </div>
     <div id="autoRegTasks" style="margin-top:12px"></div>
   </div>
@@ -402,9 +404,9 @@
     <div class="chat-log" id="chatLog"></div>
     <div class="chat-input">
       <textarea id="chatInput" rows="2" placeholder="输入消息，Ctrl+Enter 发送"></textarea>
-      <button class="btn primary" id="btnChatSend"><i data-lucide="send-horizontal"></i></button>
+      <button class="btn primary" id="btnChatSend" title="发送"><i data-lucide="send-horizontal"></i></button>
     </div>
-    <div class="chat-meta" id="chatMeta"></div>
+    <div class="chat-meta" id="chatMeta">单次调试最长等待 120 秒，发送后可随时手动停止</div>
   </div>
 </section>
 

@@ -112,13 +112,6 @@ class KeyStore:
             self._reload_if_changed()
             return next((k for k in self._keys if k["id"] == kid), None)
 
-    def reveal(self, kid: str) -> str | None:
-        """按 id 取回明文 key（WebUI 已登录才给，用于「复制」按钮）。"""
-        if kid == "env":
-            return self.env_key or None
-        k = self.find_by_id(kid)
-        return k.get("key") if k else None
-
     # ---------------- 校验 ----------------
     def verify(self, key: str) -> dict[str, Any] | None:
         """

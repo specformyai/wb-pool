@@ -11,6 +11,7 @@ wb-pool —— WorkBuddy/CodeBuddy 账号池反向代理
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import time
@@ -39,6 +40,17 @@ from .upstream_sync import (STATIC_MODELS, static_models, merge_unlisted,
                             load_models_cache as load_sync_cache, resolve_models,
                             sync_models_from_upstream, to_openai_data, vendor_of)
 from .webauth import COOKIE_NAME, SESSION_TTL, WebAuth
+
+
+class _EmptyUpstreamStream(Exception):
+    """Sentinel exception used when advancing a sync generator in a worker thread."""
+
+
+def _next_upstream_chunk(gen: Iterator[Any]) -> Any:
+    try:
+        return next(gen)
+    except StopIteration as exc:
+        raise _EmptyUpstreamStream from exc
 
 # --------------------------------------------------------------------------- #
 # 配置
@@ -216,12 +228,24 @@ async def chat_completions(request: Request) -> Any:
     payload = {k: v for k, v in body.items() if k not in ("stream", "stream_options")}
     payload["model"] = model
 
+    # WebUI 调试请求带这个头；限制上游无数据等待，避免一个坏连接永久占住账号。
+    # 普通 API 调用继续保留原来的 300 秒上限，不擅自缩短外部客户端长回答。
+    upstream_timeout = 300.0
+    raw_timeout = (request.headers.get("X-WB-Debug-Timeout") or "").strip()
+    is_debug_request = bool(raw_timeout)
+    if raw_timeout:
+        try:
+            upstream_timeout = max(10.0, min(180.0, float(raw_timeout)))
+        except ValueError:
+            upstream_timeout = 120.0
+
     # X-WB-Force-Account: 手机号或 masked，调试时指定账号
     force_key = (request.headers.get("X-WB-Force-Account") or "").strip() or None
 
     last_err: str | None = None
     tried: list[str] = []
-    max_tries = 1 if force_key else min(3, max(1, len(pool.all())))
+    # WebUI 调试以“按时释放”为优先，不在客户端停止后继续串行重试多个账号。
+    max_tries = 1 if force_key or is_debug_request else min(3, max(1, len(pool.all())))
     for _ in range(max_tries):
         t0 = time.time()
         acc = _pick_account(force_key)
@@ -230,8 +254,11 @@ async def chat_completions(request: Request) -> Any:
         tried.append(acc.masked())
         proxy = pm.pick()
         try:
-            gen = upstream.stream_chat(acc.access_token, payload, proxy=proxy)
-            first = next(gen)          # 触发首包，才能捕获上游错误
+            gen = upstream.stream_chat(acc.access_token, payload, proxy=proxy,
+                                       timeout=upstream_timeout)
+            # stream_chat 是同步 httpx 生成器，不能在 async 路由里直接 next，
+            # 否则首包卡住时会把整个事件循环（包括其它管理操作）一起卡住。
+            first = await asyncio.to_thread(_next_upstream_chunk, gen)
             t_first = time.time()      # 首字延迟锚在这里
         except upstream.UpstreamError as exc:
             last_err = f"{exc.code}: {exc.msg}"
@@ -247,7 +274,7 @@ async def chat_completions(request: Request) -> Any:
                 raise HTTPException(400, {"error": {"message": exc.msg, "code": exc.code,
                                                     "type": "invalid_request_error"}})
             continue
-        except StopIteration:
+        except _EmptyUpstreamStream:
             last_err = "上游返回空流"
             _log_call(request, model=model, ok=False, endpoint="chat", t0=t0,
                       account=acc.masked(), error=last_err, stream=want_stream)
@@ -301,16 +328,8 @@ async def chat_completions(request: Request) -> Any:
         # 非流式：聚合上游流
         content, reasoning, usage, finish, tool_calls = "", "", None, "stop", []
         try:
-            for chunk in _chain(first, gen):
-                usage = chunk.get("usage") or usage
-                for ch in chunk.get("choices") or []:
-                    d = ch.get("delta") or {}
-                    content += d.get("content") or ""
-                    reasoning += d.get("reasoning_content") or ""
-                    if d.get("tool_calls"):
-                        tool_calls.extend(d["tool_calls"])
-                    if ch.get("finish_reason"):
-                        finish = ch["finish_reason"]
+            content, reasoning, usage, finish, tool_calls = await asyncio.to_thread(
+                _collect_chat, first, gen)
         except Exception as exc:  # noqa: BLE001
             pool.release(acc, error=str(exc)[:200])
             _log_call(request, model=model, ok=False, endpoint="chat", t0=t0,
@@ -340,6 +359,26 @@ async def chat_completions(request: Request) -> Any:
 def _chain(first: Any, gen: Iterator[Any]) -> Iterator[Any]:
     yield first
     yield from gen
+
+
+def _collect_chat(first: dict[str, Any], gen: Iterator[Any]) -> tuple[
+        str, str, dict[str, Any] | None, str, list[dict[str, Any]]]:
+    """在 worker 线程聚合同步上游流，避免阻塞 FastAPI 事件循环。"""
+    content, reasoning = "", ""
+    usage: dict[str, Any] | None = None
+    finish = "stop"
+    tool_calls: list[dict[str, Any]] = []
+    for chunk in _chain(first, gen):
+        usage = chunk.get("usage") or usage
+        for ch in chunk.get("choices") or []:
+            d = ch.get("delta") or {}
+            content += d.get("content") or ""
+            reasoning += d.get("reasoning_content") or ""
+            if d.get("tool_calls"):
+                tool_calls.extend(d["tool_calls"])
+            if ch.get("finish_reason"):
+                finish = ch["finish_reason"]
+    return content, reasoning, usage, finish, tool_calls
 
 
 def _norm_chunk(chunk: dict[str, Any], cid: str, created: int, model: str) -> dict[str, Any]:
@@ -613,14 +652,6 @@ def api_keys_rotate(kid: str) -> dict[str, Any]:
     return {"ok": True, "key": nk}
 
 
-@app.get("/api/keys/{kid}/reveal", dependencies=[Depends(require_admin)])
-def api_keys_reveal(kid: str) -> dict[str, Any]:
-    k = keystore.reveal(kid)
-    if not k:
-        raise HTTPException(404, "key 不存在")
-    return {"ok": True, "key": k}
-
-
 @app.delete("/api/keys/{kid}", dependencies=[Depends(require_admin)])
 def api_keys_delete(kid: str) -> dict[str, Any]:
     if kid == "env":
@@ -822,6 +853,11 @@ def api_auto_reg_status(task_id: str) -> dict[str, Any]:
 @app.get("/api/auto_register/tasks", dependencies=[Depends(require_admin)])
 def api_auto_reg_tasks() -> dict[str, Any]:
     return {"tasks": auto_registrar.list_tasks()}
+
+
+@app.post("/api/auto_register/clear", dependencies=[Depends(require_admin)])
+def api_auto_reg_clear() -> dict[str, Any]:
+    return auto_registrar.clear_finished()
 
 
 @app.get("/api/uoomsg/balance", dependencies=[Depends(require_admin)])

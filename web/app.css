@@ -188,6 +188,9 @@ td.num{font-variant-numeric:tabular-nums;font-family:"JetBrains Mono",monospace}
 td.err-cell{max-width:220px;font-size:11.5px;color:#ffa8b2;overflow:hidden;
   text-overflow:ellipsis;white-space:nowrap}
 .row-actions{display:flex;gap:5px}
+.pool-phone{display:flex;align-items:center;gap:4px;min-width:150px}
+.pool-phone .mono{font-family:"JetBrains Mono",monospace}
+.pool-phone .btn{padding:4px 6px}
 
 /* 状态徽标 */
 .badge{display:inline-flex;align-items:center;gap:5px;padding:4px 9px;border-radius:99px;
@@ -318,6 +321,8 @@ td.err-cell{max-width:220px;font-size:11.5px;color:#ffa8b2;overflow:hidden;
 .chat-input .btn{height:42px;padding:0 17px}
 .chat-meta{margin-top:11px;font-size:11.5px;color:var(--txt3);
   font-family:"JetBrains Mono",monospace}
+.msg-stop{margin-top:8px;padding:7px 10px;border-radius:8px;font-size:11.5px;
+  color:var(--txt3);background:rgba(255,255,255,.045);border:1px solid var(--line)}
 .chat-empty{color:var(--txt3);font-size:13px;text-align:center;padding:38px 0}
 
 /* API */

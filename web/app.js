@@ -6,6 +6,9 @@ let regSession = null, regTimer = null;
 let ME = null;                                     // 当前登录用户
 let HIDE_DEAD = localStorage.getItem('wbpool_hide_dead') === '1';
 let HEALTH_WIN = Number(localStorage.getItem('wbpool_health_win') || 24);
+const VISIBLE_PHONES = new Set();                  // 仅当前页面临时显示，刷新后重新隐藏
+const CHAT_TIMEOUT_MS = 120000;
+let chatController = null, chatAbortReason = '', chatActiveBody = null;
 
 const icons = () => window.lucide && lucide.createIcons();
 
@@ -435,9 +438,12 @@ async function loadPool() {
   }
 
   const tb = $('#poolTable tbody');
-  tb.innerHTML = shown.length ? shown.map(a => `
+  tb.innerHTML = shown.length ? shown.map(a => {
+    const phoneVisible = VISIBLE_PHONES.has(a.phone);
+    return `
     <tr>
-      <td><div style="font-family:'JetBrains Mono',monospace">${a.masked}</div>
+      <td><div class="pool-phone"><span class="mono" data-phone-text>${esc(phoneVisible ? a.phone : a.masked)}</span>
+          <button class="btn tiny ghost" data-act="phone" data-p="${esc(a.phone)}" data-m="${esc(a.masked)}" title="${phoneVisible ? '隐藏号码' : '显示号码'}" aria-label="${phoneVisible ? '隐藏号码' : '显示号码'}"><i data-lucide="${phoneVisible ? 'eye-off' : 'eye'}"></i></button></div>
           <div style="font-size:11px;color:var(--txt3)">${a.label || a.uid.slice(0, 10) || '—'}</div></td>
       <td><span class="badge ${a.status}">${ST[a.status] || a.status}</span></td>
       <td class="num">${fmt(a.credits_total, 2)}</td>
@@ -453,14 +459,26 @@ async function loadPool() {
         <button class="btn tiny ghost" data-act="tg" data-p="${a.phone}" data-s="${a.status === 'disabled' ? 'active' : 'disabled'}" title="启用/停用"><i data-lucide="power"></i></button>
         <button class="btn tiny danger" data-act="rm" data-p="${a.phone}" data-m="${esc(a.masked)}" title="移除"><i data-lucide="trash-2"></i></button>
       </div></td>
-    </tr>`).join('')
+    </tr>`;
+  }).join('')
     : `<tr><td colspan="10" style="text-align:center;color:var(--txt3);padding:30px">${
         all.length ? '当前筛选下没有账号，点「已隐藏不可用」可看全部' : '池子是空的'}</td></tr>`;
   icons();
 
-  tb.querySelectorAll('button[data-act]').forEach(b => b.onclick = () => run(b, async () => {
+  tb.querySelectorAll('button[data-act]').forEach(b => b.onclick = () => {
     const p = b.dataset.p, act = b.dataset.act;
-    if (act === 'ci') {
+    if (act === 'phone') {
+      const visible = VISIBLE_PHONES.has(p);
+      if (visible) VISIBLE_PHONES.delete(p); else VISIBLE_PHONES.add(p);
+      b.closest('td').querySelector('[data-phone-text]').textContent = visible ? b.dataset.m : p;
+      b.title = visible ? '显示号码' : '隐藏号码';
+      b.setAttribute('aria-label', visible ? '显示号码' : '隐藏号码');
+      setIcon(b, visible ? 'eye' : 'eye-off');
+      icons();
+      return;
+    }
+    return run(b, async () => {
+      if (act === 'ci') {
       const r = await api('/api/pool/checkin_one', { method: 'POST', body: JSON.stringify({ phone: p }) });
       if (r.skipped || r.already) toast(`${r.masked || p} 今天已签到`, 'info');
       else toast(r.ok ? `签到成功 +${r.credit} 积分，余额 ${r.credits_total}` : `签到失败: ${r.error}`, r.ok ? 'ok' : 'err');
@@ -475,8 +493,9 @@ async function loadPool() {
       const r = await api('/api/pool/refresh_token', { method: 'POST', body: JSON.stringify({ phone: p }) });
       toast(r.ok ? `token 已刷新，有效 ${r.expires_in_h} 小时` : `刷新失败: ${r.error}`, r.ok ? 'ok' : 'err');
     }
-    loadPool(); health();
-  }));
+      loadPool(); health();
+    });
+  });
 }
 $('#btnPoolReload').onclick = e => run(e.currentTarget, loadPool);
 $('#btnPoolBal').onclick = e => run(e.currentTarget, async () => {
@@ -776,7 +795,45 @@ function addMsg(role, text = '') {
   $('#chatLog').scrollTop = $('#chatLog').scrollHeight;
   return d.querySelector('.msg-body');
 }
-$('#btnChatClear').onclick = () => { $('#chatLog').innerHTML = ''; $('#chatMeta').textContent = ''; };
+function paintChatButton(running) {
+  const btn = $('#btnChatSend');
+  btn.disabled = false;
+  btn.classList.toggle('danger', running);
+  btn.classList.toggle('primary', !running);
+  btn.title = running ? '停止生成' : '发送';
+  btn.innerHTML = `<i data-lucide="${running ? 'square' : 'send-horizontal'}"></i>`;
+  icons();
+}
+function stopChat(reason = 'manual') {
+  const controller = chatController;
+  if (!controller) return;
+  chatAbortReason = reason;
+  controller.__wbStopReason = reason;
+  controller.abort();
+  // 先释放界面，不能把按钮恢复寄托在底层 fetch 是否及时 reject。
+  if (chatController === controller) {
+    chatController = null;
+    const body = chatActiveBody;
+    if (body) {
+      body.querySelector('.cursor')?.remove();
+      if (!body.querySelector('.msg-stop')) {
+        const note = document.createElement('div');
+        note.className = 'msg-stop';
+        note.textContent = reason === 'timeout' ? '已等待 120 秒，自动停止' : '已手动停止';
+        body.appendChild(note);
+      }
+    }
+    $('#chatMeta').textContent = reason === 'timeout'
+      ? '请求已超时释放，可立即发送下一条' : '请求已停止，可立即发送下一条';
+    paintChatButton(false);
+    chatActiveBody = null;
+  }
+}
+$('#btnChatClear').onclick = () => {
+  if (chatController) stopChat('manual');
+  $('#chatLog').innerHTML = '';
+  $('#chatMeta').textContent = '单次调试最长等待 120 秒，发送后可随时手动停止';
+};
 
 /* 账号下拉：切到对话调试时自动拉取，让用户指定要用哪个号 */
 async function loadChatAccounts() {
@@ -791,6 +848,7 @@ async function loadChatAccounts() {
 
 
 async function send() {
+  if (chatController) { stopChat('manual'); return; }
   const inp = $('#chatInput'), text = inp.value.trim();
   if (!text) return;
   const model = $('#chatModel').value || 'default';
@@ -799,16 +857,28 @@ async function send() {
   const body = addMsg('bot', '');
   body.innerHTML = '<span class="cursor"></span>';
   const t0 = performance.now();
-  const btn = $('#btnChatSend'); busy(btn, true);
+  const controller = new AbortController();
+  chatController = controller;
+  chatActiveBody = body;
+  chatAbortReason = '';
+  paintChatButton(true);
+  $('#chatMeta').textContent = '正在生成，可点击停止按钮中断';
+  const timer = setTimeout(() => {
+    if (chatController === controller) {
+      chatAbortReason = 'timeout';
+      stopChat('timeout');
+    }
+  }, CHAT_TIMEOUT_MS);
 
-  const h = { 'Content-Type': 'application/json' };
+  const h = { 'Content-Type': 'application/json', 'X-WB-Debug-Timeout': String(CHAT_TIMEOUT_MS / 1000) };
   if (KEY) h['Authorization'] = `Bearer ${KEY}`;
   const forceAcc = ($('#chatAccount')?.value || '').trim();
   if (forceAcc) h['X-WB-Force-Account'] = forceAcc;
   try {
     const r = await fetch('/v1/chat/completions', {
       method: 'POST', headers: h,
-      body: JSON.stringify({ model, messages: [{ role: 'user', content: text }], stream })
+      body: JSON.stringify({ model, messages: [{ role: 'user', content: text }], stream }),
+      signal: controller.signal,
     });
     const acct = r.headers.get('X-WB-Account') || '';
     if (!r.ok) {
@@ -855,11 +925,30 @@ async function send() {
       `模型 ${model} · 账号 ${acct} · 总耗时 ${dt}s · 首字 ${ttfb}s` +
       (usage ? ` · tokens ${usage.prompt_tokens}+${usage.completion_tokens}=${usage.total_tokens}` : '');
   } catch (e) {
-    body.textContent = `[异常] ${e.message}`;
-  } finally { busy(btn, false); }
+    if (e.name === 'AbortError') {
+      body.querySelector('.cursor')?.remove();
+      const note = document.createElement('div');
+      note.className = 'msg-stop';
+      const timedOut = controller.__wbStopReason === 'timeout' || chatAbortReason === 'timeout';
+      note.textContent = timedOut ? '已等待 120 秒，自动停止' : '已手动停止';
+      if (!body.querySelector('.msg-stop')) body.appendChild(note);
+      $('#chatMeta').textContent = timedOut ? '请求已超时释放，可立即发送下一条' : '请求已停止，可立即发送下一条';
+      toast(timedOut ? '对话调试已超时停止' : '已停止生成', timedOut ? 'err' : 'info');
+    } else {
+      body.textContent = `[异常] ${e.message}`;
+      $('#chatMeta').textContent = '请求异常，已释放';
+    }
+  } finally {
+    clearTimeout(timer);
+    if (chatController === controller) {
+      chatController = null;
+      chatActiveBody = null;
+      paintChatButton(false);
+    }
+  }
 }
 const esc = s => String(s).replace(/[<>&"]/g, c => ({ '<': '&lt;', '>': '&gt;', '&': '&amp;', '"': '&quot;' }[c]));
-$('#btnChatSend').onclick = send;
+$('#btnChatSend').onclick = () => chatController ? stopChat('manual') : send();
 $('#chatInput').addEventListener('keydown', e => {
   if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); send(); }
 });
@@ -879,9 +968,7 @@ async function loadKeys() {
         ${isEnv ? '<div class="k-sub">来自 .env 的 WB_API_KEY</div>'
                 : (k.note ? `<div class="k-sub">${esc(k.note)}</div>` : '')}
       </td>
-      <td><code class="mono k-mask">${esc(k.masked)}</code>
-        ${isEnv ? '' : `<button class="btn tiny ghost" data-act="reveal" data-k="${k.id}" title="查看完整密钥"><i data-lucide="eye"></i></button>`}
-      </td>
+      <td><code class="mono k-mask">${esc(k.masked)}</code></td>
       <td><span class="badge ${k.enabled ? 'active' : 'disabled'}">${k.enabled ? '启用' : '已停用'}</span></td>
       <td class="num">${fmt(k.request_count)}</td>
       <td class="num">${fmt(k.tokens)}</td>
@@ -901,10 +988,7 @@ async function loadKeys() {
 
   tb.querySelectorAll('button[data-act]').forEach(b => b.onclick = () => run(b, async () => {
     const id = b.dataset.k, act = b.dataset.act;
-    if (act === 'reveal') {
-      const r = await api(`/api/keys/${id}/reveal`);
-      showNewKey(r.key, '完整密钥');
-    } else if (act === 'toggle') {
+    if (act === 'toggle') {
       await api(`/api/keys/${id}/update`, {
         method: 'POST', body: JSON.stringify({ enabled: b.dataset.en === '1' }),
       });
@@ -1011,20 +1095,22 @@ async function renderAutoRegTasks() {
     return;
   }
   el.innerHTML = tasks.map(t => {
-    const icon = t.status === 'done' ? '✓' : t.status === 'failed' ? '✗' : t.status === 'running' ? '⟳' : '…';
+    const icon = t.status === 'done' ? 'circle-check-big' : t.status === 'failed' ? 'circle-x' : t.status === 'running' ? 'loader-circle' : t.status === 'stopped' ? 'square' : 'clock-3';
     const color = t.status === 'done' ? 'var(--ok)' : t.status === 'failed' ? 'var(--err)' : 'var(--acc)';
-    const last = t.steps.length ? t.steps[t.steps.length - 1] : '';
+    const steps = t.steps || [];
+    const last = steps.length ? steps[steps.length - 1] : '';
     const masked = t.result && t.result.masked ? t.result.masked : '';
     return `<div class="task-row" data-tid="${t.id}" style="border:1px solid var(--border);border-radius:6px;padding:10px 12px;margin-bottom:6px;cursor:pointer" onclick="toggleTaskLog('${t.id}')">
       <div style="display:flex;gap:8px;align-items:center">
-        <span style="color:${color};font-weight:700;min-width:16px">${icon}</span>
+        <span style="color:${color};font-weight:700;min-width:16px"><i data-lucide="${icon}"></i></span>
         <span style="flex:1;font-size:13px">${masked || `任务 ${t.id}`} <span style="color:var(--txt3);font-size:11px">${t.age}s 前</span></span>
         <span style="font-size:11px;color:var(--txt3)">${t.status}</span>
       </div>
       <div style="font-size:11px;color:var(--txt3);margin-top:4px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${last}</div>
-      <pre id="tasklog-${t.id}" style="display:none;margin-top:8px;font-size:11px;white-space:pre-wrap;color:var(--txt2)">${(t.steps || []).join('\n')}</pre>
+      <pre id="tasklog-${t.id}" style="display:none;margin-top:8px;font-size:11px;white-space:pre-wrap;color:var(--txt2)">${steps.join('\n')}</pre>
     </div>`;
   }).join('');
+  icons();
 }
 
 function toggleTaskLog(tid) {
@@ -1062,6 +1148,13 @@ $('#btnAutoReg').onclick = e => run(e.currentTarget, async () => {
 });
 
 $('#btnAutoRegRefresh').onclick = e => run(e.currentTarget, renderAutoRegTasks);
+$('#btnAutoRegClear').onclick = e => run(e.currentTarget, async () => {
+  if (!await askConfirm('清空已结束任务', '只会清除成功、失败和已停止的历史任务；仍在运行的任务会保留。', '清空')) return;
+  const r = await api('/api/auto_register/clear', { method: 'POST' });
+  const suffix = r.running ? `，${r.running} 个运行中任务已保留` : '';
+  toast(`已清空 ${r.cleared} 个任务${suffix}`, 'ok');
+  await renderAutoRegTasks();
+});
 
 // 把 autoRegInviteSel 同步进 loadInviteCodes
 const _origLoad = loadInviteCodes;

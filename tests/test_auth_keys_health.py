@@ -69,7 +69,7 @@ with TestClient(app) as c:
     c.post(f"/api/keys/{kid2}/update", json={"enabled": True})
     ck("轮换后新 key 可用", c.get("/v1/models", headers={"x-api-key": nk}).status_code == 200)
     ck("轮换后旧 key 失效", c.get("/v1/models", headers={"x-api-key": k2}).status_code == 401)
-    ck("reveal 拿回明文", c.get(f"/api/keys/{kid2}/reveal").json()["key"] == nk)
+    ck("列表不能恢复密钥明文", c.get(f"/api/keys/{kid2}/reveal").status_code == 404)
     ck("删除 key", c.delete(f"/api/keys/{kid2}").status_code == 200)
     ck("删除后 401", c.get("/v1/models", headers={"x-api-key": nk}).status_code == 401)
 
