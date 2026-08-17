@@ -109,7 +109,14 @@ with TestClient(M.app) as client:
         "max_tokens": 1024,
         "system": [{"type": "text", "text": "你是天气助手。"}],
         "messages": [{"role": "user", "content": "查询杭州天气"}],
-        "tools": [tool],
+        "tools": [
+            tool,
+            {
+                "name": "lookup_time",
+                "description": "查询时间",
+                "input_schema": {"type": "object", "properties": {}},
+            },
+        ],
         "tool_choice": {"type": "tool", "name": "lookup_weather"},
     })
     assert first.status_code == 200, first.text
@@ -122,9 +129,7 @@ with TestClient(M.app) as client:
             "parameters": tool["input_schema"],
         },
     }], sent
-    assert sent["tool_choice"] == {
-        "type": "function", "function": {"name": "lookup_weather"},
-    }, sent
+    assert sent["tool_choice"] == "required", sent
     assert sent["messages"] == [
         {"role": "system", "content": "你是天气助手。"},
         {"role": "user", "content": "查询杭州天气"},

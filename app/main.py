@@ -567,9 +567,10 @@ def _anthropic_tools_to_openai(tools: Any) -> list[dict[str, Any]]:
 def _anthropic_tool_choice_to_openai(choice: Any) -> Any:
     if not isinstance(choice, dict):
         return choice
-    ctype = choice.get("type")
+    ctype = str(choice.get("type") or "")
+    # WorkBuddy 上游的 tool_choice 字段是字符串；命名工具由路由层同时过滤 tools 保证语义。
     if ctype == "tool" and choice.get("name"):
-        return {"type": "function", "function": {"name": str(choice["name"])}}
+        return "required"
     return {"auto": "auto", "any": "required", "none": "none"}.get(ctype, "auto")
 
 
@@ -603,12 +604,22 @@ async def anthropic_messages(request: Request) -> Any:
             payload[key] = body[key]
     if "stop_sequences" in body:
         payload["stop"] = body.get("stop_sequences") or []
+    choice = body.get("tool_choice")
     if "tools" in body:
-        payload["tools"] = _anthropic_tools_to_openai(body.get("tools"))
+        converted_tools = _anthropic_tools_to_openai(body.get("tools"))
+        # Anthropic 的命名 tool_choice 在该上游没有对象形式：只保留目标工具 + required。
+        if isinstance(choice, dict) and choice.get("type") == "tool" and choice.get("name"):
+            wanted = str(choice["name"])
+            converted_tools = [item for item in converted_tools
+                               if (item.get("function") or {}).get("name") == wanted]
+        payload["tools"] = converted_tools
     if "tool_choice" in body:
-        payload["tool_choice"] = _anthropic_tool_choice_to_openai(body.get("tool_choice"))
-    if "disable_parallel_tool_use" in body:
-        payload["parallel_tool_calls"] = not bool(body.get("disable_parallel_tool_use"))
+        payload["tool_choice"] = _anthropic_tool_choice_to_openai(choice)
+    disable_parallel = body.get("disable_parallel_tool_use")
+    if disable_parallel is None and isinstance(choice, dict):
+        disable_parallel = choice.get("disable_parallel_tool_use")
+    if disable_parallel is not None:
+        payload["parallel_tool_calls"] = not bool(disable_parallel)
 
     acc = _pick_account(
         (request.headers.get("X-WB-Force-Account") or "").strip() or None
