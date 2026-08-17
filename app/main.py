@@ -17,7 +17,7 @@ import os
 import time
 import uuid
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any, AsyncIterator, Iterator
 
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
@@ -529,9 +529,12 @@ def _anthropic_messages_to_openai(body: dict[str, Any]) -> list[dict[str, Any]]:
             for block in content:
                 if not isinstance(block, dict) or block.get("type") != "tool_result":
                     continue
-                result = _anthropic_text(block.get("content"))
+                result = _anthropic_content_to_openai(block.get("content"))
                 if block.get("is_error"):
-                    result = f"[tool_error] {result}"
+                    if isinstance(result, str):
+                        result = f"[tool_error] {result}"
+                    else:
+                        result = [{"type": "text", "text": "[tool_error]"}, *result]
                 out.append({
                     "role": "tool",
                     "tool_call_id": str(block.get("tool_use_id") or ""),
@@ -589,6 +592,23 @@ def _anthropic_event(event: dict[str, Any]) -> str:
             f"data: {json.dumps(event, ensure_ascii=False)}\n\n")
 
 
+def _anthropic_error_response(status: int, message: str) -> JSONResponse:
+    """返回 Anthropic 原生错误对象，避免 FastAPI 的 HTTPException detail 包装。"""
+    status = status if status >= 400 else 502
+    error_type = {
+        400: "invalid_request_error",
+        401: "authentication_error",
+        403: "permission_error",
+        404: "not_found_error",
+        413: "request_too_large",
+        429: "rate_limit_error",
+    }.get(status, "api_error")
+    return JSONResponse(status_code=status, content={
+        "type": "error",
+        "error": {"type": error_type, "message": message},
+    })
+
+
 @app.post("/v1/messages", dependencies=[Depends(require_api)])
 async def anthropic_messages(request: Request) -> Any:
     body = await request.json()
@@ -637,17 +657,13 @@ async def anthropic_messages(request: Request) -> Any:
         pool.release(acc, error=f"{exc.code}: {exc.msg}")
         _log_call(request, model=model, ok=False, endpoint="messages", t0=t0,
                   account=acc.masked(), code=exc.code, error=exc.msg, stream=want_stream)
-        raise HTTPException(exc.status if exc.status >= 400 else 502,
-                            {"type": "error", "error": {"type": "api_error",
-                                                          "message": exc.msg}})
+        return _anthropic_error_response(exc.status, exc.msg)
     except _EmptyUpstreamStream:
         err = "上游返回空流"
         pool.release(acc, error=err)
         _log_call(request, model=model, ok=False, endpoint="messages", t0=t0,
                   account=acc.masked(), error=err, stream=want_stream)
-        raise HTTPException(502, {"type": "error", "error": {
-            "type": "api_error", "message": err,
-        }})
+        return _anthropic_error_response(502, err)
     except Exception as exc:  # noqa: BLE001
         err = str(exc)[:200]
         if is_proxy_error(err) and proxy:
@@ -657,26 +673,28 @@ async def anthropic_messages(request: Request) -> Any:
             pool.release(acc, error=err)
         _log_call(request, model=model, ok=False, endpoint="messages", t0=t0,
                   account=acc.masked(), error=err, stream=want_stream)
-        raise HTTPException(502, {"type": "error", "error": {
-            "type": "api_error", "message": f"上游失败: {err}",
-        }})
+        return _anthropic_error_response(502, f"上游失败: {err}")
 
     if want_stream:
-        def a_stream() -> Iterator[str]:
+        async def a_stream() -> AsyncIterator[str]:
             usage: dict[str, Any] | None = None
             finish = "stop"
             text_index: int | None = None
             next_index = 0
             tool_call_store: dict[int, dict[str, Any]] = {}
-            yield _anthropic_event({
-                "type": "message_start",
-                "message": {"id": mid, "type": "message", "role": "assistant",
-                            "content": [], "model": model, "stop_reason": None,
-                            "stop_sequence": None,
-                            "usage": {"input_tokens": 0, "output_tokens": 0}},
-            })
+            released = False
+            logged = False
             try:
-                for chunk in _chain(first, gen):
+                yield _anthropic_event({
+                    "type": "message_start",
+                    "message": {"id": mid, "type": "message", "role": "assistant",
+                                "content": [], "model": model, "stop_reason": None,
+                                "stop_sequence": None,
+                                "usage": {"input_tokens": 0, "output_tokens": 0}},
+                })
+
+                chunk = first
+                while True:
                     usage = chunk.get("usage") or usage
                     for choice in chunk.get("choices") or []:
                         delta = choice.get("delta") or {}
@@ -698,6 +716,10 @@ async def anthropic_messages(request: Request) -> Any:
                                                         delta["tool_calls"])
                         if choice.get("finish_reason"):
                             finish = choice["finish_reason"]
+                    try:
+                        chunk = await asyncio.to_thread(_next_upstream_chunk, gen)
+                    except _EmptyUpstreamStream:
+                        break
 
                 if text_index is not None:
                     yield _anthropic_event({
@@ -728,10 +750,12 @@ async def anthropic_messages(request: Request) -> Any:
                 credit = ledger.record(model, usage)
                 total_tokens = (usage or {}).get("total_tokens", 0)
                 pool.release(acc, tokens=total_tokens, credits=credit)
+                released = True
                 _log_call(request, model=model, ok=True, endpoint="messages", t0=t0,
                           tokens=total_tokens, credits=credit,
                           account=acc.masked(), stream=True, t_first=t_first,
                           out_tokens=(usage or {}).get("completion_tokens", 0))
+                logged = True
                 yield _anthropic_event({
                     "type": "message_delta",
                     "delta": {"stop_reason": _anthropic_stop_reason(
@@ -741,13 +765,30 @@ async def anthropic_messages(request: Request) -> Any:
                 yield _anthropic_event({"type": "message_stop"})
             except Exception as exc:  # noqa: BLE001
                 err = str(exc)[:200]
-                pool.release(acc, error=err)
-                _log_call(request, model=model, ok=False, endpoint="messages", t0=t0,
-                          account=acc.masked(), error=err, stream=True)
+                if not released:
+                    pool.release(acc, error=err)
+                    released = True
+                if not logged:
+                    _log_call(request, model=model, ok=False, endpoint="messages", t0=t0,
+                              account=acc.masked(), error=err, stream=True)
+                    logged = True
                 yield _anthropic_event({
                     "type": "error",
                     "error": {"type": "api_error", "message": err},
                 })
+            finally:
+                close = getattr(gen, "close", None)
+                if callable(close):
+                    try:
+                        await asyncio.to_thread(close)
+                    except Exception:  # noqa: BLE001
+                        pass
+                if not released:
+                    pool.release(acc)
+                    released = True
+                if not logged:
+                    _log_call(request, model=model, ok=False, endpoint="messages", t0=t0,
+                              account=acc.masked(), error="client_disconnected", stream=True)
 
         return StreamingResponse(a_stream(), media_type="text/event-stream",
                                  headers={"Cache-Control": "no-cache",
@@ -762,9 +803,7 @@ async def anthropic_messages(request: Request) -> Any:
         pool.release(acc, error=err)
         _log_call(request, model=model, ok=False, endpoint="messages", t0=t0,
                   account=acc.masked(), error=err)
-        raise HTTPException(502, {"type": "error", "error": {
-            "type": "api_error", "message": f"上游流中断: {err}",
-        }})
+        return _anthropic_error_response(502, f"上游流中断: {err}")
 
     content_blocks: list[dict[str, Any]] = []
     if text or not tool_calls:
