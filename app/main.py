@@ -364,13 +364,48 @@ def _chain(first: Any, gen: Iterator[Any]) -> Iterator[Any]:
     yield from gen
 
 
+def _accumulate_tool_call_deltas(
+        store: dict[int, dict[str, Any]], deltas: list[dict[str, Any]]) -> None:
+    """把 OpenAI 流式 tool_calls 分片按 index 合并成完整调用。"""
+    for fallback_index, part in enumerate(deltas):
+        if not isinstance(part, dict):
+            continue
+        try:
+            index = int(part.get("index", fallback_index))
+        except (TypeError, ValueError):
+            index = fallback_index
+        current = store.setdefault(index, {
+            "id": "", "type": "function",
+            "function": {"name": "", "arguments": ""},
+        })
+        if part.get("id"):
+            current["id"] = str(part["id"])
+        if part.get("type"):
+            current["type"] = str(part["type"])
+        fn = part.get("function") or {}
+        if fn.get("name"):
+            current["function"]["name"] += str(fn["name"])
+        if fn.get("arguments"):
+            current["function"]["arguments"] += str(fn["arguments"])
+
+
+def _finalize_tool_calls(store: dict[int, dict[str, Any]]) -> list[dict[str, Any]]:
+    calls: list[dict[str, Any]] = []
+    for index in sorted(store):
+        call = store[index]
+        if not call.get("id"):
+            call["id"] = f"call_{uuid.uuid4().hex[:24]}"
+        calls.append(call)
+    return calls
+
+
 def _collect_chat(first: dict[str, Any], gen: Iterator[Any]) -> tuple[
         str, str, dict[str, Any] | None, str, list[dict[str, Any]]]:
     """在 worker 线程聚合同步上游流，避免阻塞 FastAPI 事件循环。"""
     content, reasoning = "", ""
     usage: dict[str, Any] | None = None
     finish = "stop"
-    tool_calls: list[dict[str, Any]] = []
+    tool_call_store: dict[int, dict[str, Any]] = {}
     for chunk in _chain(first, gen):
         usage = chunk.get("usage") or usage
         for ch in chunk.get("choices") or []:
@@ -378,10 +413,10 @@ def _collect_chat(first: dict[str, Any], gen: Iterator[Any]) -> tuple[
             content += d.get("content") or ""
             reasoning += d.get("reasoning_content") or ""
             if d.get("tool_calls"):
-                tool_calls.extend(d["tool_calls"])
+                _accumulate_tool_call_deltas(tool_call_store, d["tool_calls"])
             if ch.get("finish_reason"):
                 finish = ch["finish_reason"]
-    return content, reasoning, usage, finish, tool_calls
+    return content, reasoning, usage, finish, _finalize_tool_calls(tool_call_store)
 
 
 def _norm_chunk(chunk: dict[str, Any], cid: str, created: int, model: str) -> dict[str, Any]:
@@ -411,31 +446,169 @@ def _norm_chunk(chunk: dict[str, Any], cid: str, created: int, model: str) -> di
 # --------------------------------------------------------------------------- #
 # Anthropic 兼容
 # --------------------------------------------------------------------------- #
+def _anthropic_text(value: Any) -> str:
+    """提取 Anthropic 文本块；tool_result 的正文也复用这条路径。"""
+    if isinstance(value, str):
+        return value
+    if not isinstance(value, list):
+        return "" if value is None else str(value)
+    return "".join(
+        str(block.get("text") or "")
+        for block in value
+        if isinstance(block, dict) and block.get("type") == "text"
+    )
+
+
+def _anthropic_content_to_openai(value: Any) -> str | list[dict[str, Any]]:
+    """把 Anthropic 的 text/image 内容块转换为 OpenAI content。"""
+    if isinstance(value, str):
+        return value
+    if not isinstance(value, list):
+        return "" if value is None else str(value)
+    items: list[dict[str, Any]] = []
+    for block in value:
+        if not isinstance(block, dict):
+            continue
+        btype = block.get("type")
+        if btype == "text":
+            items.append({"type": "text", "text": str(block.get("text") or "")})
+        elif btype == "image":
+            source = block.get("source") or {}
+            url = ""
+            if source.get("type") == "base64" and source.get("data"):
+                media_type = source.get("media_type") or "image/png"
+                url = f"data:{media_type};base64,{source['data']}"
+            elif source.get("type") == "url":
+                url = str(source.get("url") or "")
+            if url:
+                items.append({"type": "image_url", "image_url": {"url": url}})
+    if all(item.get("type") == "text" for item in items):
+        return "".join(str(item.get("text") or "") for item in items)
+    return items
+
+
+def _anthropic_messages_to_openai(body: dict[str, Any]) -> list[dict[str, Any]]:
+    """保真转换对话历史，尤其是 assistant.tool_use 与 user.tool_result。"""
+    out: list[dict[str, Any]] = []
+    system_text = _anthropic_text(body.get("system"))
+    if system_text:
+        out.append({"role": "system", "content": system_text})
+
+    for message in body.get("messages") or []:
+        if not isinstance(message, dict):
+            continue
+        role = str(message.get("role") or "user")
+        content = message.get("content")
+        if not isinstance(content, list):
+            out.append({"role": role, "content": _anthropic_content_to_openai(content)})
+            continue
+
+        if role == "assistant":
+            text = _anthropic_text(content)
+            calls: list[dict[str, Any]] = []
+            for block in content:
+                if not isinstance(block, dict) or block.get("type") != "tool_use":
+                    continue
+                calls.append({
+                    "id": str(block.get("id") or f"call_{uuid.uuid4().hex[:24]}"),
+                    "type": "function",
+                    "function": {
+                        "name": str(block.get("name") or ""),
+                        "arguments": json.dumps(block.get("input") or {}, ensure_ascii=False,
+                                                separators=(",", ":")),
+                    },
+                })
+            item: dict[str, Any] = {"role": "assistant", "content": text}
+            if calls:
+                item["tool_calls"] = calls
+            out.append(item)
+            continue
+
+        if role == "user":
+            # OpenAI 把每个工具结果表示成独立的 role=tool 消息。
+            for block in content:
+                if not isinstance(block, dict) or block.get("type") != "tool_result":
+                    continue
+                result = _anthropic_text(block.get("content"))
+                if block.get("is_error"):
+                    result = f"[tool_error] {result}"
+                out.append({
+                    "role": "tool",
+                    "tool_call_id": str(block.get("tool_use_id") or ""),
+                    "content": result,
+                })
+            normal_blocks = [block for block in content
+                             if not (isinstance(block, dict)
+                                     and block.get("type") == "tool_result")]
+            normal_content = _anthropic_content_to_openai(normal_blocks)
+            if normal_content not in ("", []):
+                out.append({"role": "user", "content": normal_content})
+            continue
+
+        out.append({"role": role, "content": _anthropic_content_to_openai(content)})
+    return out
+
+
+def _anthropic_tools_to_openai(tools: Any) -> list[dict[str, Any]]:
+    converted: list[dict[str, Any]] = []
+    for tool in tools or []:
+        if not isinstance(tool, dict) or not tool.get("name"):
+            continue
+        function: dict[str, Any] = {
+            "name": str(tool["name"]),
+            "parameters": tool.get("input_schema") or {"type": "object", "properties": {}},
+        }
+        if tool.get("description") is not None:
+            function["description"] = str(tool.get("description") or "")
+        converted.append({"type": "function", "function": function})
+    return converted
+
+
+def _anthropic_tool_choice_to_openai(choice: Any) -> Any:
+    if not isinstance(choice, dict):
+        return choice
+    ctype = choice.get("type")
+    if ctype == "tool" and choice.get("name"):
+        return {"type": "function", "function": {"name": str(choice["name"])}}
+    return {"auto": "auto", "any": "required", "none": "none"}.get(ctype, "auto")
+
+
+def _anthropic_stop_reason(finish: str | None, has_tools: bool = False) -> str:
+    if has_tools or finish in ("tool_calls", "function_call"):
+        return "tool_use"
+    return {
+        "length": "max_tokens",
+        "stop": "end_turn",
+        "content_filter": "end_turn",
+    }.get(finish or "stop", "end_turn")
+
+
+def _anthropic_event(event: dict[str, Any]) -> str:
+    return (f"event: {event['type']}\n"
+            f"data: {json.dumps(event, ensure_ascii=False)}\n\n")
+
+
 @app.post("/v1/messages", dependencies=[Depends(require_api)])
 async def anthropic_messages(request: Request) -> Any:
     body = await request.json()
     model = body.get("model") or "default"
     want_stream = bool(body.get("stream"))
 
-    msgs: list[dict[str, Any]] = []
-    sysp = body.get("system")
-    if isinstance(sysp, str) and sysp:
-        msgs.append({"role": "system", "content": sysp})
-    elif isinstance(sysp, list):
-        txt = "".join(b.get("text", "") for b in sysp if isinstance(b, dict))
-        if txt:
-            msgs.append({"role": "system", "content": txt})
-    for m in body.get("messages") or []:
-        c = m.get("content")
-        if isinstance(c, list):
-            c = "".join(b.get("text", "") for b in c
-                        if isinstance(b, dict) and b.get("type") == "text")
-        msgs.append({"role": m.get("role", "user"), "content": c or ""})
-
-    payload = {"model": model, "messages": msgs}
-    for k in ("temperature", "top_p", "max_tokens"):
-        if k in body:
-            payload[k] = body[k]
+    payload: dict[str, Any] = {
+        "model": model,
+        "messages": _anthropic_messages_to_openai(body),
+    }
+    for key in ("temperature", "top_p", "max_tokens"):
+        if key in body:
+            payload[key] = body[key]
+    if "stop_sequences" in body:
+        payload["stop"] = body.get("stop_sequences") or []
+    if "tools" in body:
+        payload["tools"] = _anthropic_tools_to_openai(body.get("tools"))
+    if "tool_choice" in body:
+        payload["tool_choice"] = _anthropic_tool_choice_to_openai(body.get("tool_choice"))
+    if "disable_parallel_tool_use" in body:
+        payload["parallel_tool_calls"] = not bool(body.get("disable_parallel_tool_use"))
 
     acc = _pick_account(
         (request.headers.get("X-WB-Force-Account") or "").strip() or None
@@ -446,89 +619,169 @@ async def anthropic_messages(request: Request) -> Any:
 
     try:
         gen = upstream.stream_chat(acc.access_token, payload, proxy=proxy)
-        first = next(gen)
+        # 和 OpenAI 路由一致：同步 httpx 首包不能阻塞 FastAPI 事件循环。
+        first = await asyncio.to_thread(_next_upstream_chunk, gen)
         t_first = time.time()
     except upstream.UpstreamError as exc:
         pool.release(acc, error=f"{exc.code}: {exc.msg}")
         _log_call(request, model=model, ok=False, endpoint="messages", t0=t0,
                   account=acc.masked(), code=exc.code, error=exc.msg, stream=want_stream)
         raise HTTPException(exc.status if exc.status >= 400 else 502,
-                            {"type": "error", "error": {"type": "api_error", "message": exc.msg}})
+                            {"type": "error", "error": {"type": "api_error",
+                                                          "message": exc.msg}})
+    except _EmptyUpstreamStream:
+        err = "上游返回空流"
+        pool.release(acc, error=err)
+        _log_call(request, model=model, ok=False, endpoint="messages", t0=t0,
+                  account=acc.masked(), error=err, stream=want_stream)
+        raise HTTPException(502, {"type": "error", "error": {
+            "type": "api_error", "message": err,
+        }})
     except Exception as exc:  # noqa: BLE001
         err = str(exc)[:200]
-        if is_proxy_error(err):
+        if is_proxy_error(err) and proxy:
             pm.mark_bad(proxy)
+            pool.release(acc)
         else:
             pool.release(acc, error=err)
         _log_call(request, model=model, ok=False, endpoint="messages", t0=t0,
                   account=acc.masked(), error=err, stream=want_stream)
-        raise HTTPException(502, f"上游失败: {err}")
+        raise HTTPException(502, {"type": "error", "error": {
+            "type": "api_error", "message": f"上游失败: {err}",
+        }})
 
     if want_stream:
         def a_stream() -> Iterator[str]:
-            usage = None
-            yield ("event: message_start\ndata: " + json.dumps({
+            usage: dict[str, Any] | None = None
+            finish = "stop"
+            text_index: int | None = None
+            next_index = 0
+            tool_call_store: dict[int, dict[str, Any]] = {}
+            yield _anthropic_event({
                 "type": "message_start",
                 "message": {"id": mid, "type": "message", "role": "assistant",
                             "content": [], "model": model, "stop_reason": None,
-                            "usage": {"input_tokens": 0, "output_tokens": 0}}}) + "\n\n")
-            yield ("event: content_block_start\ndata: " + json.dumps({
-                "type": "content_block_start", "index": 0,
-                "content_block": {"type": "text", "text": ""}}) + "\n\n")
+                            "stop_sequence": None,
+                            "usage": {"input_tokens": 0, "output_tokens": 0}},
+            })
             try:
                 for chunk in _chain(first, gen):
                     usage = chunk.get("usage") or usage
-                    for ch in chunk.get("choices") or []:
-                        piece = (ch.get("delta") or {}).get("content") or ""
+                    for choice in chunk.get("choices") or []:
+                        delta = choice.get("delta") or {}
+                        piece = delta.get("content") or ""
                         if piece:
-                            yield ("event: content_block_delta\ndata: " + json.dumps({
-                                "type": "content_block_delta", "index": 0,
-                                "delta": {"type": "text_delta", "text": piece}},
-                                ensure_ascii=False) + "\n\n")
-                pool.release(acc, tokens=(usage or {}).get("total_tokens", 0),
-                             credits=ledger.record(model, usage))
+                            if text_index is None:
+                                text_index = next_index
+                                next_index += 1
+                                yield _anthropic_event({
+                                    "type": "content_block_start", "index": text_index,
+                                    "content_block": {"type": "text", "text": ""},
+                                })
+                            yield _anthropic_event({
+                                "type": "content_block_delta", "index": text_index,
+                                "delta": {"type": "text_delta", "text": piece},
+                            })
+                        if delta.get("tool_calls"):
+                            _accumulate_tool_call_deltas(tool_call_store,
+                                                        delta["tool_calls"])
+                        if choice.get("finish_reason"):
+                            finish = choice["finish_reason"]
+
+                if text_index is not None:
+                    yield _anthropic_event({
+                        "type": "content_block_stop", "index": text_index,
+                    })
+
+                tool_calls = _finalize_tool_calls(tool_call_store)
+                for call in tool_calls:
+                    block_index = next_index
+                    next_index += 1
+                    function = call.get("function") or {}
+                    arguments = str(function.get("arguments") or "{}")
+                    yield _anthropic_event({
+                        "type": "content_block_start", "index": block_index,
+                        "content_block": {
+                            "type": "tool_use", "id": call["id"],
+                            "name": str(function.get("name") or ""), "input": {},
+                        },
+                    })
+                    yield _anthropic_event({
+                        "type": "content_block_delta", "index": block_index,
+                        "delta": {"type": "input_json_delta", "partial_json": arguments},
+                    })
+                    yield _anthropic_event({
+                        "type": "content_block_stop", "index": block_index,
+                    })
+
+                credit = ledger.record(model, usage)
+                total_tokens = (usage or {}).get("total_tokens", 0)
+                pool.release(acc, tokens=total_tokens, credits=credit)
                 _log_call(request, model=model, ok=True, endpoint="messages", t0=t0,
-                          tokens=(usage or {}).get("total_tokens", 0),
-                          credits=float((usage or {}).get("credit") or 0),
+                          tokens=total_tokens, credits=credit,
                           account=acc.masked(), stream=True, t_first=t_first,
                           out_tokens=(usage or {}).get("completion_tokens", 0))
+                yield _anthropic_event({
+                    "type": "message_delta",
+                    "delta": {"stop_reason": _anthropic_stop_reason(
+                        finish, bool(tool_calls)), "stop_sequence": None},
+                    "usage": {"output_tokens": (usage or {}).get("completion_tokens", 0)},
+                })
+                yield _anthropic_event({"type": "message_stop"})
             except Exception as exc:  # noqa: BLE001
-                pool.release(acc, error=str(exc)[:200])
+                err = str(exc)[:200]
+                pool.release(acc, error=err)
                 _log_call(request, model=model, ok=False, endpoint="messages", t0=t0,
-                          account=acc.masked(), error=str(exc)[:200], stream=True)
-            yield "event: content_block_stop\ndata: " + json.dumps(
-                {"type": "content_block_stop", "index": 0}) + "\n\n"
-            yield ("event: message_delta\ndata: " + json.dumps({
-                "type": "message_delta", "delta": {"stop_reason": "end_turn"},
-                "usage": {"output_tokens": (usage or {}).get("completion_tokens", 0)}}) + "\n\n")
-            yield "event: message_stop\ndata: " + json.dumps({"type": "message_stop"}) + "\n\n"
+                          account=acc.masked(), error=err, stream=True)
+                yield _anthropic_event({
+                    "type": "error",
+                    "error": {"type": "api_error", "message": err},
+                })
 
         return StreamingResponse(a_stream(), media_type="text/event-stream",
                                  headers={"Cache-Control": "no-cache",
                                           "X-Accel-Buffering": "no",
                                           "X-WB-Account": acc.masked()})
 
-    text, usage = "", None
     try:
-        for chunk in _chain(first, gen):
-            usage = chunk.get("usage") or usage
-            for ch in chunk.get("choices") or []:
-                text += (ch.get("delta") or {}).get("content") or ""
+        text, _reasoning, usage, finish, tool_calls = await asyncio.to_thread(
+            _collect_chat, first, gen)
     except Exception as exc:  # noqa: BLE001
-        pool.release(acc, error=str(exc)[:200])
+        err = str(exc)[:200]
+        pool.release(acc, error=err)
         _log_call(request, model=model, ok=False, endpoint="messages", t0=t0,
-                  account=acc.masked(), error=str(exc)[:200])
-        raise HTTPException(502, f"上游流中断: {exc}"[:200])
+                  account=acc.masked(), error=err)
+        raise HTTPException(502, {"type": "error", "error": {
+            "type": "api_error", "message": f"上游流中断: {err}",
+        }})
+
+    content_blocks: list[dict[str, Any]] = []
+    if text or not tool_calls:
+        content_blocks.append({"type": "text", "text": text})
+    for call in tool_calls:
+        function = call.get("function") or {}
+        raw_arguments = str(function.get("arguments") or "{}")
+        try:
+            tool_input = json.loads(raw_arguments)
+        except json.JSONDecodeError:
+            tool_input = {"_raw_arguments": raw_arguments}
+        content_blocks.append({
+            "type": "tool_use", "id": call["id"],
+            "name": str(function.get("name") or ""), "input": tool_input,
+        })
+
     credit = ledger.record(model, usage)
-    pool.release(acc, tokens=(usage or {}).get("total_tokens", 0), credits=credit)
+    total_tokens = (usage or {}).get("total_tokens", 0)
+    pool.release(acc, tokens=total_tokens, credits=credit)
     _log_call(request, model=model, ok=True, endpoint="messages", t0=t0,
-              tokens=(usage or {}).get("total_tokens", 0), credits=credit,
+              tokens=total_tokens, credits=credit,
               account=acc.masked(), t_first=t_first,
               out_tokens=(usage or {}).get("completion_tokens", 0))
     return {
         "id": mid, "type": "message", "role": "assistant", "model": model,
-        "content": [{"type": "text", "text": text}],
-        "stop_reason": "end_turn",
+        "content": content_blocks,
+        "stop_reason": _anthropic_stop_reason(finish, bool(tool_calls)),
+        "stop_sequence": None,
         "usage": {"input_tokens": (usage or {}).get("prompt_tokens", 0),
                   "output_tokens": (usage or {}).get("completion_tokens", 0)},
     }
