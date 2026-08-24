@@ -95,8 +95,13 @@ export function fmtDur(ms) {
   if (ms == null || Number.isNaN(Number(ms))) return '—';
   const v = Number(ms);
   if (v < 1000) return `${Math.round(v)}ms`;
-  if (v < 60000) return `${(v / 1000).toFixed(1)}s`;
-  return `${Math.floor(v / 60000)}m${Math.round((v % 60000) / 1000)}s`;
+  // 先按输出精度定量再判区间：v=59999 若直接比 60000 会走秒分支，
+  // toFixed(1) 把 59.999 进位成 "60.0s"（本该是 1m0s）。
+  if (Math.round(v / 100) / 10 < 60) return `${(v / 1000).toFixed(1)}s`;
+  // 总秒数先定下来再拆分钟，否则分钟与秒各自取整，
+  // 秒进位到 60 时分钟不跟着涨 -> "11m60s"。
+  const total = Math.round(v / 1000);
+  return `${Math.floor(total / 60)}m${total % 60}s`;
 }
 
 /* ---------------------------------------------------------------- 反馈 UI */
