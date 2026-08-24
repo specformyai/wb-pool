@@ -1,0 +1,78 @@
+/* ==========================================================================
+   rates.css —— 「模型与倍率」页（路由 id: rates）
+   作用域：.page-rates（mountRates 时加在页面根容器上）
+   旧版变量映射：--r2→--r / --txt2→--tx2 / --txt3→--tx3 / --surface2→--panel
+   --err→--bad / --line2→--line-2；--acc --acc2 --ok --warn --line --ease 沿用
+   ========================================================================== */
+
+/* ---------- 顶部状态条（来源药丸 / 数量 / 探测时间 / 错误） ---------- */
+.page-rates .model-state{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin:0 0 15px}
+.page-rates .model-state:empty{display:none}
+.page-rates .ms-pill,.page-rates .ms-item{display:inline-flex;align-items:center;gap:5px;
+  padding:5px 10px;border-radius:8px;font-size:11.5px;
+  background:var(--panel);color:var(--tx2);border:1px solid var(--line)}
+.page-rates .ms-pill.console_api{color:var(--ok);border-color:rgba(46,230,168,.25);background:rgba(46,230,168,.09)}
+.page-rates .ms-pill.static{color:var(--warn);border-color:rgba(255,184,77,.25);background:rgba(255,184,77,.09)}
+.page-rates .ms-item.err{color:var(--bad);border-color:rgba(255,93,110,.28);background:rgba(255,93,110,.09)}
+.page-rates .ms-pill svg,.page-rates .ms-item svg{width:13px;height:13px;stroke-width:2.1}
+
+/* ---------- 工具条：搜索 + 排序 + 能力筛选 ---------- */
+.page-rates .rates-bar{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin:0 0 14px}
+.page-rates .rates-search{position:relative;flex:1 1 220px;min-width:180px}
+.page-rates .rates-search>svg{position:absolute;left:10px;top:50%;transform:translateY(-50%);
+  width:14px;height:14px;color:var(--tx3);pointer-events:none}
+.page-rates .rates-search .inp{width:100%;padding-left:30px}
+.page-rates .rates-sort{flex:0 0 auto}
+.page-rates .rates-chips{display:flex;gap:6px;flex-wrap:wrap}
+.page-rates .chip{display:inline-flex;align-items:center;gap:5px;padding:6px 11px;border-radius:8px;
+  border:1px solid var(--line);background:var(--panel);color:var(--tx2);font-size:11.5px;
+  font-family:inherit;cursor:pointer;transition:.2s var(--ease)}
+.page-rates .chip:hover{border-color:var(--line-2);color:var(--fg)}
+.page-rates .chip.on{color:var(--acc);border-color:rgba(45,212,191,.35);background:rgba(45,212,191,.1)}
+.page-rates .chip svg{width:13px;height:13px;stroke-width:2.1}
+.page-rates .rates-count{margin-left:auto;font-size:11.5px;white-space:nowrap}
+
+/* ---------- 卡片网格 ---------- */
+.page-rates .model-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(210px,1fr));gap:11px}
+.page-rates .rates-cell{grid-column:1/-1}
+.page-rates .model-card{padding:15px;border-radius:var(--r);background:rgba(0,0,0,.24);
+  border:1px solid var(--line);transition:.3s var(--ease);position:relative;overflow:hidden}
+.page-rates .model-card.ok{border-color:rgba(46,230,168,.22)}
+.page-rates .model-card.no{opacity:.42}
+.page-rates .model-card:hover{transform:translateY(-3px);border-color:var(--line-2)}
+.page-rates .model-card::before{content:"";position:absolute;top:0;left:0;right:0;height:2px;
+  background:linear-gradient(90deg,var(--acc),var(--acc2));opacity:0;transition:.3s}
+.page-rates .model-card.ok::before{opacity:1}
+.page-rates .model-def{position:absolute;top:11px;right:11px;padding:2px 7px;border-radius:5px;
+  font-size:9.5px;letter-spacing:.4px;color:var(--ok);background:rgba(46,230,168,.13);
+  border:1px solid rgba(46,230,168,.25)}
+.page-rates .model-name{font-family:"JetBrains Mono",monospace;font-size:13.5px;font-weight:500;
+  word-break:break-all;margin-bottom:7px}
+.page-rates .model-alias{font-size:11.5px;color:var(--tx3);margin-top:-3px}
+.page-rates .model-tags{display:flex;gap:5px;flex-wrap:wrap;margin-top:9px;min-height:47px;align-content:flex-start}
+.page-rates .tag{padding:3px 8px;border-radius:6px;background:var(--panel);font-size:10.5px;
+  color:var(--tx2);letter-spacing:.2px}
+.page-rates .tag.tier{color:var(--acc);background:rgba(45,212,191,.12)}
+.page-rates .tag.rate{color:var(--warn);background:rgba(255,184,77,.12);
+  font-family:"JetBrains Mono",monospace}
+.page-rates .tag.unlisted{color:var(--acc2);background:rgba(59,130,246,.13);
+  border:1px solid rgba(59,130,246,.26)}
+.page-rates .model-caps{display:flex;gap:9px;flex-wrap:wrap;margin-top:10px}
+.page-rates .cap{display:inline-flex;align-items:center;gap:4px;font-size:10.5px;color:var(--tx2)}
+.page-rates .cap svg{width:12px;height:12px;stroke-width:2.1;opacity:.8}
+.page-rates .model-desc{font-size:11px;color:var(--tx2);margin-top:10px;line-height:1.55;
+  padding-top:9px;border-top:1px solid var(--line);display:-webkit-box;-webkit-line-clamp:2;
+  -webkit-box-orient:vertical;overflow:hidden;min-height:44px}
+.page-rates .model-why{font-size:11px;color:var(--tx3);margin-top:7px;line-height:1.5}
+
+/* ---------- 按钮加载态 ---------- */
+.page-rates .btn.busy svg{animation:rates-spin .9s linear infinite}
+@keyframes rates-spin{to{transform:rotate(360deg)}}
+
+/* ---------- 窄屏：工具条换行堆叠 ---------- */
+@media (max-width:640px){
+  .page-rates .rates-bar{flex-direction:column;align-items:stretch}
+  .page-rates .rates-search{flex:1 1 auto;min-width:0}
+  .page-rates .rates-chips{width:100%}
+  .page-rates .rates-count{margin-left:0}
+}

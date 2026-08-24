@@ -1,0 +1,488 @@
+/* ============================================================
+ * shared.css —— 设计 token + 全站公共组件
+ *
+ * 注意变量命名：k3 生成 pool.css 时用的是 --panel/--tx1/--acc2/--r，
+ * 后续页面约定用 --card/--fg/--acc-2/--radius。这里在 :root 同时提供
+ * 两套别名指向同一色值，避免为了统一命名去重写已验证过的 pool.css。
+ * ============================================================ */
+
+:root {
+  /* 基础色 */
+  --bg: #070b12;
+  --bg-2: #0d1420;
+  --panel: rgba(148, 163, 184, 0.05);
+  --panel-2: #0d1420;
+  --card: rgba(148, 163, 184, 0.05);       /* = --panel */
+  --line: rgba(148, 163, 184, 0.14);
+  --line-2: rgba(148, 163, 184, 0.26);
+
+  /* 文本 */
+  --tx1: #e9eff8;
+  --tx2: #93a2b8;
+  --tx3: #5f6d83;
+  --fg: #e9eff8;                            /* = --tx1 */
+  --fg-2: #93a2b8;                          /* = --tx2 */
+  --fg-3: #7c8a9f;                          /* = --tx3；原 #5f6d83 在深底上约 3.9:1，
+                                               小字号过不了 WCAG AA 的 4.5:1，提亮一档 */
+
+  /* 强调与语义色 */
+  --acc: #2dd4bf;
+  --acc2: #3b82f6;
+  --acc-2: #3b82f6;                         /* = --acc2 */
+  --ok: #34d399;
+  --warn: #f5b544;
+  --bad: #f6596e;
+
+  --ease: cubic-bezier(0.22, 1, 0.36, 1);
+  --r: 16px;
+  --radius: 16px;                           /* = --r */
+
+  /* 第三套别名：派单给 k3 时契约里写的是 --surface/--line2/--r2 这套名字，
+   * 而这里原本只有 --panel/--line-2/--radius。名字对不上时 var() 静默失效，
+   * 卡片会变成透明底 + 直角，页面看着"渲染了一半"却查不出报错 ——
+   * health.css 就是这么坏的。别名一次补齐，省得每次重写 k3 的产出。 */
+  --surface: rgba(148, 163, 184, 0.05);     /* = --panel */
+  --surface2: rgba(148, 163, 184, 0.09);    /* 比 --surface 亮一档，嵌套小卡用 */
+  --line2: rgba(148, 163, 184, 0.26);       /* = --line-2 */
+  --r1: 11px;                               /* 小控件圆角，对齐 .btn / .badge */
+  --r2: 14px;                               /* 卡片圆角，对齐 .stat 的 14px */
+  --bg-1: #0d1420;                          /* = --bg-2 */
+
+  color-scheme: dark;
+}
+
+* { box-sizing: border-box; }
+
+html, body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--fg);
+  font-family: "Inter", "PingFang SC", "Microsoft YaHei", system-ui, -apple-system, sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+
+body { min-height: 100vh; }
+
+/* ---------------------------------------------------------------- 布局外壳 */
+
+.shell { display: flex; min-height: 100vh; }
+
+.side {
+  width: 232px; flex: 0 0 232px;
+  border-right: 1px solid var(--line);
+  background: linear-gradient(180deg, rgba(45, 212, 191, 0.04), transparent 240px);
+  padding: 20px 12px;
+  display: flex; flex-direction: column; gap: 4px;
+  position: sticky; top: 0; height: 100vh; overflow-y: auto;
+}
+.brand { display: flex; align-items: center; gap: 10px; padding: 6px 10px 18px; }
+.brand-mark {
+  width: 34px; height: 34px; flex: 0 0 34px;
+  display: grid; place-items: center;
+  /* 图标本身已是圆形贴边、四角透明的位图，所以这里不再加底色和圆角
+     （叠上去会露出方形色块）。发光改成跟随品牌紫，收起态下它是唯一
+     的品牌元素，没有阴影会显得贴在背景上。 */
+  border-radius: 50%;
+  box-shadow: 0 8px 22px rgba(108, 77, 255, 0.30);
+}
+.brand-mark img { width: 34px; height: 34px; display: block; border-radius: 50%; }
+.brand-mark i { width: 19px; height: 19px; }
+.brand-t { font-size: 15px; font-weight: 700; letter-spacing: 0.2px; }
+.brand-s { font-size: 11px; color: var(--fg-3); margin-top: 1px; }
+
+.nav-item {
+  display: flex; align-items: center; gap: 10px;
+  padding: 10px 12px; border-radius: 11px;
+  color: var(--fg-2); font-size: 14px; font-weight: 500;
+  cursor: pointer; border: 1px solid transparent;
+  transition: background 0.18s var(--ease), color 0.18s var(--ease);
+  text-align: left; width: 100%;
+}
+.nav-item i { width: 17px; height: 17px; flex: 0 0 17px; }
+.nav-item:hover { background: rgba(148, 163, 184, 0.07); color: var(--fg); }
+.nav-item.on {
+  background: rgba(45, 212, 191, 0.11);
+  border-color: rgba(45, 212, 191, 0.28);
+  color: var(--acc);
+}
+
+/* ---------------------------------------------------------------- 侧栏收起
+ * 收起后只留图标（68px）。用 body.side-collapsed 做开关，状态存 localStorage。
+ * 宽度加 transition，但 nav 文字用 display:none 而不是 opacity —— 半透明的
+ * 文字在 68px 里会被图标挤出去，收起过程中看着很脏。
+ * ---------------------------------------------------------------------- */
+.side { transition: width 0.2s var(--ease), flex-basis 0.2s var(--ease); }
+
+.side-toggle {
+  margin-left: auto; flex: 0 0 26px;
+  width: 26px; height: 26px; border-radius: 8px;
+  display: grid; place-items: center;
+  color: var(--fg-3); cursor: pointer;
+  border: 1px solid transparent; background: transparent;
+  transition: background 0.16s var(--ease), color 0.16s var(--ease);
+}
+.side-toggle:hover { background: rgba(148, 163, 184, 0.1); color: var(--fg); }
+.side-toggle i { width: 16px; height: 16px; }
+
+body.side-collapsed .side { width: 68px; flex: 0 0 68px; padding: 20px 10px; }
+body.side-collapsed .brand { padding: 6px 0 14px; justify-content: center; }
+body.side-collapsed .brand > div:not(.brand-mark),
+body.side-collapsed .nav-item > span { display: none; }
+body.side-collapsed .side-toggle { display: none; }
+body.side-collapsed .nav-item { justify-content: center; padding: 10px 0; }
+
+/* 收起态把 logo 底色改成中性 —— 展开态有文字辅助，青色渐变没问题；
+   收起后只剩方块，和激活项的青色高亮同形同色，扫一眼像有两个选中项。 */
+body.side-collapsed .brand-mark {
+  background: rgba(148, 163, 184, 0.14);
+  color: var(--fg-2);
+}
+
+/* 收起时把展开按钮挪到 brand 下方，居中一行，避免和 logo 抢 68px。
+   刻意做得比导航项弱（无边框底色、图标更淡）并用分隔线隔开，
+   否则它和 10 个纯图标导航项长得一模一样，会被当成第一个页面入口误点。 */
+.side-expand { display: none; }
+body.side-collapsed .side-expand {
+  display: grid; place-items: center;
+  width: 100%; height: 26px; margin: 0 0 10px;
+  border-radius: 8px; color: var(--fg-3);
+  cursor: pointer; border: none; background: transparent;
+  border-bottom: 1px solid var(--line); padding-bottom: 8px;
+  opacity: 0.55;
+  transition: opacity 0.16s var(--ease), color 0.16s var(--ease);
+}
+body.side-collapsed .side-expand:hover { opacity: 1; color: var(--fg); }
+body.side-collapsed .side-expand i { width: 15px; height: 15px; }
+
+/* 设置推到侧栏底部，业务导航留在上方 —— 收起态下方原本有大片空白，
+   靠 margin-top:auto 分组比塞一条分隔线更清楚。上方留一条细线保留分组线索。 */
+.nav-item.nav-last {
+  margin-top: auto;
+  border-top-color: var(--line);
+  border-radius: 0 0 11px 11px;
+  padding-top: 14px;
+}
+/* 激活时上边框必须跟着变青，否则三面青、上面一条灰，边框看着是断的。
+   （.nav-item.on 只设了 border-color，会被上面的 border-top-color 覆盖） */
+.nav-item.nav-last.on { border-top-color: rgba(45, 212, 191, 0.28); }
+
+/* 收起态 hover 出浮层标签，否则只有图标认不出是哪一页 */
+body.side-collapsed .nav-item { position: relative; }
+body.side-collapsed .nav-item::after {
+  content: attr(data-label);
+  position: absolute; left: calc(100% + 10px); top: 50%;
+  transform: translateY(-50%);
+  padding: 5px 9px; border-radius: 7px; white-space: nowrap;
+  background: var(--bg-2); border: 1px solid var(--line);
+  color: var(--fg); font-size: 12px; font-weight: 500;
+  opacity: 0; pointer-events: none; z-index: 40;
+  transition: opacity 0.14s var(--ease);
+}
+body.side-collapsed .nav-item:hover::after { opacity: 1; }
+.nav-sep { height: 1px; background: var(--line); margin: 10px 8px; }
+
+.main { flex: 1; min-width: 0; }
+.view { max-width: 1200px; margin: 0 auto; padding: 28px 20px 120px; position: relative; }
+
+/* 顶部氛围光（与 pool.css 的 ::before 同风格，作用在 .view 上） */
+.view::before {
+  content: ""; position: absolute; inset: -60px 0 auto; height: 420px;
+  pointer-events: none;
+  background:
+    radial-gradient(640px 300px at 18% 0%, rgba(45, 212, 191, 0.12), transparent 60%),
+    radial-gradient(560px 280px at 85% 0%, rgba(59, 130, 246, 0.10), transparent 60%);
+}
+.view > * { position: relative; }
+
+/* 移动端：侧栏变底部 tab bar */
+@media (max-width: 860px) {
+  .shell { flex-direction: column; }
+  .side {
+    width: auto; flex: none; height: auto; position: fixed;
+    bottom: 0; left: 0; right: 0; top: auto; z-index: 50;
+    flex-direction: row; overflow-x: auto; padding: 8px;
+    border-right: none; border-top: 1px solid var(--line-2);
+    background: rgba(7, 11, 18, 0.94); backdrop-filter: blur(16px);
+    gap: 6px;
+  }
+  .brand, .nav-sep { display: none; }
+  .nav-item { flex-direction: column; gap: 4px; font-size: 11px; padding: 7px 11px; white-space: nowrap; }
+  .nav-item span { font-size: 10.5px; }
+  .view { padding: 20px 14px 96px; }
+}
+
+/* ---------------------------------------------------------------- 页头 */
+
+.page-head { display: flex; align-items: flex-start; gap: 14px; flex-wrap: wrap; margin-bottom: 22px; }
+.page-head h1 { margin: 0; font-size: 25px; font-weight: 700; letter-spacing: -0.3px; }
+.page-head p { margin: 5px 0 0; font-size: 13.5px; color: var(--fg-2); }
+.page-head .acts { margin-left: auto; display: flex; gap: 8px; flex-wrap: wrap; }
+
+/* ---------------------------------------------------------------- 按钮 */
+
+button { font: inherit; color: inherit; background: none; border: none; cursor: pointer; }
+button:disabled { cursor: not-allowed; opacity: 0.5; }
+
+.btn {
+  display: inline-flex; align-items: center; gap: 7px;
+  padding: 9px 14px; border-radius: 11px;
+  font-size: 13.5px; font-weight: 600;
+  border: 1px solid var(--line-2); color: var(--fg);
+  background: rgba(148, 163, 184, 0.06);
+  transition: transform 0.14s var(--ease), background 0.18s var(--ease), border-color 0.18s var(--ease);
+  white-space: nowrap;
+}
+.btn i { width: 15px; height: 15px; flex: 0 0 15px; }
+.btn:hover:not(:disabled) { background: rgba(148, 163, 184, 0.12); border-color: var(--line-2); }
+.btn:active:not(:disabled) { transform: scale(0.97); }
+.btn.primary {
+  background: linear-gradient(135deg, rgba(45, 212, 191, 0.92), rgba(59, 130, 246, 0.86));
+  border-color: transparent; color: #04121a;
+}
+.btn.primary:hover:not(:disabled) { filter: brightness(1.07); }
+.btn.danger { color: var(--bad); border-color: rgba(246, 89, 110, 0.34); background: rgba(246, 89, 110, 0.09); }
+.btn.danger:hover:not(:disabled) { background: rgba(246, 89, 110, 0.16); }
+.btn.ghost { background: transparent; }
+.btn.sm { padding: 7px 10px; font-size: 12.5px; border-radius: 9px; }
+.btn.icon { padding: 8px; border-radius: 9px; }
+.btn.icon i { width: 16px; height: 16px; }
+
+/* ---------------------------------------------------------------- 卡片 / 统计 */
+
+.card {
+  background: var(--card); border: 1px solid var(--line);
+  border-radius: var(--radius); padding: 16px 18px;
+}
+.card-h { display: flex; align-items: center; gap: 10px; margin-bottom: 14px; }
+.card-h h3 { margin: 0; font-size: 15px; font-weight: 650; }
+.card-h p { margin: 2px 0 0; font-size: 12.5px; color: var(--fg-2); }
+.card-h .acts { margin-left: auto; display: flex; gap: 7px; }
+
+/* auto-fit 会按可用宽度尽量塞，6 张卡在宽屏被排成 5+1，最后一张孤零零换行、
+   右侧留大片空白，像没加载完。改成按卡片数量分档，让每一档都能排满整行。
+   各页卡片数不同（账号池 4 张、概览 6 张、邀请 5 张），所以用 :has() 按实际
+   子元素个数选择列数，而不是写死一个数字。 */
+.stats { display: grid; gap: 12px; margin-bottom: 18px; grid-template-columns: repeat(4, 1fr); }
+.stats:has(> .stat:nth-child(5)) { grid-template-columns: repeat(5, 1fr); }
+.stats:has(> .stat:nth-child(6)) { grid-template-columns: repeat(6, 1fr); }
+.stats:has(> .stat:nth-child(7)) { grid-template-columns: repeat(4, 1fr); }
+
+/* 中屏收成 3 列：6 张正好 3+3，5 张 3+2，4 张 3+1（4 张时保持 2×2 更整齐） */
+@media (max-width: 1500px) {
+  .stats,
+  .stats:has(> .stat:nth-child(5)),
+  .stats:has(> .stat:nth-child(6)),
+  .stats:has(> .stat:nth-child(7)) { grid-template-columns: repeat(3, 1fr); }
+  .stats:not(:has(> .stat:nth-child(5))) { grid-template-columns: repeat(2, 1fr); }
+}
+@media (max-width: 900px) {
+  .stats,
+  .stats:has(> .stat:nth-child(5)),
+  .stats:has(> .stat:nth-child(6)),
+  .stats:has(> .stat:nth-child(7)) { grid-template-columns: repeat(2, 1fr); }
+}
+@media (max-width: 560px) {
+  .stats,
+  .stats:has(> .stat:nth-child(5)),
+  .stats:has(> .stat:nth-child(6)),
+  .stats:has(> .stat:nth-child(7)) { grid-template-columns: 1fr; }
+}
+.stat {
+  display: flex; align-items: center; gap: 13px;
+  padding: 15px 16px; border-radius: 14px;
+  background: var(--card); border: 1px solid var(--line);
+}
+.stat-ic {
+  width: 40px; height: 40px; flex: 0 0 40px; border-radius: 12px;
+  display: grid; place-items: center;
+  background: rgba(45, 212, 191, 0.13); color: var(--acc);
+}
+.stat-ic i { width: 19px; height: 19px; }
+.stat.warn .stat-ic { background: rgba(245, 181, 68, 0.14); color: var(--warn); }
+.stat.bad .stat-ic { background: rgba(246, 89, 110, 0.14); color: var(--bad); }
+.stat-v { font-size: 21px; font-weight: 700; letter-spacing: -0.4px; line-height: 1.15; }
+.stat-l { font-size: 12px; color: var(--fg-2); margin-top: 3px; }
+
+/* ---------------------------------------------------------------- 表单控件 */
+
+.field { display: flex; flex-direction: column; gap: 6px; }
+.field label { font-size: 12.5px; color: var(--fg-2); font-weight: 550; }
+
+input[type="text"], input[type="number"], input[type="password"], input[type="search"],
+textarea, select {
+  appearance: none; -webkit-appearance: none;
+  background: rgba(148, 163, 184, 0.07);
+  border: 1px solid var(--line-2); border-radius: 11px;
+  color: var(--fg); font: inherit; font-size: 13.5px;
+  padding: 9px 12px; width: 100%;
+  transition: border-color 0.18s var(--ease), background 0.18s var(--ease);
+}
+input:focus, textarea:focus, select:focus {
+  outline: none; border-color: rgba(45, 212, 191, 0.55);
+  background: rgba(45, 212, 191, 0.06);
+}
+input::placeholder, textarea::placeholder { color: var(--fg-3); }
+textarea { resize: vertical; min-height: 72px; }
+
+/* 原生 select 在暗色下箭头是系统样式且展开面板会闪白，这里重绘箭头 */
+select {
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='14' height='14' viewBox='0 0 24 24' fill='none' stroke='%2393a2b8' stroke-width='2.4' stroke-linecap='round'%3E%3Cpath d='M6 9l6 6 6-6'/%3E%3C/svg%3E");
+  background-repeat: no-repeat; background-position: right 11px center;
+  padding-right: 32px; cursor: pointer;
+}
+select option { background: var(--bg-2); color: var(--fg); }
+
+/* 开关 */
+.switch { position: relative; width: 40px; height: 22px; flex: 0 0 40px; cursor: pointer; }
+.switch input { position: absolute; opacity: 0; width: 100%; height: 100%; margin: 0; cursor: pointer; }
+.switch i {
+  position: absolute; inset: 0; border-radius: 999px;
+  background: rgba(148, 163, 184, 0.22); transition: background 0.2s var(--ease);
+}
+.switch i::after {
+  content: ""; position: absolute; top: 3px; left: 3px;
+  width: 16px; height: 16px; border-radius: 50%;
+  background: var(--fg-2); transition: transform 0.2s var(--ease), background 0.2s var(--ease);
+}
+.switch input:checked + i { background: rgba(45, 212, 191, 0.32); }
+.switch input:checked + i::after { transform: translateX(18px); background: var(--acc); }
+.switch input:disabled + i { opacity: 0.45; cursor: not-allowed; }
+
+/* 分段控件 */
+.seg { display: inline-flex; padding: 3px; gap: 2px; border-radius: 12px; background: rgba(148, 163, 184, 0.08); border: 1px solid var(--line); }
+.seg button {
+  padding: 7px 14px; border-radius: 9px; font-size: 13px; font-weight: 600;
+  color: var(--fg-2); transition: background 0.18s var(--ease), color 0.18s var(--ease);
+}
+.seg button.on { background: rgba(45, 212, 191, 0.16); color: var(--acc); box-shadow: inset 0 0 0 1px rgba(45, 212, 191, 0.26); }
+.seg button:hover:not(.on) { color: var(--fg); }
+
+/* 标签胶囊 */
+.chips { display: flex; gap: 7px; flex-wrap: wrap; }
+.chip {
+  padding: 6px 12px; border-radius: 999px; font-size: 12.5px; font-weight: 550;
+  border: 1px solid var(--line); color: var(--fg-2); background: transparent;
+  transition: all 0.18s var(--ease);
+}
+.chip.on { background: rgba(45, 212, 191, 0.13); border-color: rgba(45, 212, 191, 0.32); color: var(--acc); }
+.chip:hover:not(.on) { border-color: var(--line-2); color: var(--fg); }
+
+/* ---------------------------------------------------------------- 表格 */
+
+.tbl-wrap { border: 1px solid var(--line); border-radius: var(--radius); overflow: hidden; background: var(--card); }
+.tbl-scroll { overflow-x: auto; }
+table.tbl { width: 100%; border-collapse: collapse; font-size: 13.5px; }
+table.tbl th {
+  text-align: left; padding: 11px 14px; font-size: 11.5px; font-weight: 650;
+  letter-spacing: 0.4px; text-transform: uppercase; color: var(--fg-3);
+  background: rgba(148, 163, 184, 0.04); border-bottom: 1px solid var(--line);
+  white-space: nowrap;
+}
+table.tbl th.sortable { cursor: pointer; user-select: none; }
+table.tbl th.sortable:hover { color: var(--fg-2); }
+table.tbl th .si { display: inline-block; width: 13px; height: 13px; vertical-align: -2px; margin-left: 3px; opacity: 0.5; }
+table.tbl th.act .si { opacity: 1; color: var(--acc); }
+table.tbl td { padding: 12px 14px; border-bottom: 1px solid rgba(148, 163, 184, 0.08); vertical-align: middle; }
+table.tbl tbody tr:last-child td { border-bottom: none; }
+table.tbl tbody tr { transition: background 0.14s var(--ease); }
+table.tbl tbody tr:hover { background: rgba(148, 163, 184, 0.045); }
+table.tbl tbody tr.bad-row { background: rgba(246, 89, 110, 0.055); }
+table.tbl tbody tr.bad-row:hover { background: rgba(246, 89, 110, 0.09); }
+.mono { font-family: "JetBrains Mono", "SF Mono", ui-monospace, Menlo, Consolas, monospace; font-size: 12.5px; }
+.num { text-align: right; font-variant-numeric: tabular-nums; }
+
+/* ---------------------------------------------------------------- 徽章 / 进度 */
+
+.badge {
+  display: inline-flex; align-items: center; gap: 5px;
+  padding: 4px 9px; border-radius: 999px; font-size: 11.5px; font-weight: 600;
+  border: 1px solid transparent; white-space: nowrap;
+}
+.badge::before { content: ""; width: 5px; height: 5px; border-radius: 50%; background: currentColor; flex: 0 0 5px; }
+.badge.nodot::before { display: none; }
+.badge.ok { color: var(--ok); background: rgba(52, 211, 153, 0.12); border-color: rgba(52, 211, 153, 0.26); }
+.badge.warn { color: var(--warn); background: rgba(245, 181, 68, 0.12); border-color: rgba(245, 181, 68, 0.26); }
+.badge.bad { color: var(--bad); background: rgba(246, 89, 110, 0.12); border-color: rgba(246, 89, 110, 0.26); }
+.badge.idle, .badge.none { color: var(--fg-3); background: rgba(148, 163, 184, 0.1); border-color: var(--line); }
+.badge.acc { color: var(--acc); background: rgba(45, 212, 191, 0.12); border-color: rgba(45, 212, 191, 0.26); }
+
+.bar { height: 4px; border-radius: 999px; background: rgba(148, 163, 184, 0.16); overflow: hidden; }
+.bar > i { display: block; height: 100%; border-radius: 999px; background: var(--acc); transition: width 0.4s var(--ease); }
+.bar.ok > i { background: var(--ok); }
+.bar.warn > i { background: var(--warn); }
+.bar.bad > i { background: var(--bad); }
+.bar.none > i { background: var(--fg-3); }
+
+/* ---------------------------------------------------------------- 状态态 */
+
+.skl {
+  height: 15px; border-radius: 7px; margin: 9px 0;
+  background: linear-gradient(90deg, rgba(148,163,184,0.08), rgba(148,163,184,0.16), rgba(148,163,184,0.08));
+  background-size: 200% 100%; animation: shine 1.4s linear infinite;
+}
+@keyframes shine { 0% { background-position: 200% 0; } 100% { background-position: -200% 0; } }
+
+.err-state, .empty-state {
+  display: flex; flex-direction: column; align-items: center; gap: 12px;
+  padding: 52px 20px; text-align: center; color: var(--fg-2);
+}
+.err-state i, .empty-state i { width: 34px; height: 34px; color: var(--fg-3); }
+.err-state .err-msg { font-size: 13.5px; max-width: 460px; line-height: 1.6; }
+.empty-state .t { font-size: 14.5px; font-weight: 600; color: var(--fg); }
+.empty-state .s { font-size: 13px; }
+
+/* ---------------------------------------------------------------- 弹窗 */
+
+.modal { position: fixed; inset: 0; z-index: 90; display: flex; align-items: center; justify-content: center; padding: 20px; }
+.modal-mask { position: absolute; inset: 0; background: rgba(3, 6, 12, 0.72); backdrop-filter: blur(5px); animation: fade 0.2s var(--ease); }
+.modal-box {
+  position: relative; width: 100%; max-width: 540px; max-height: 86vh; overflow-y: auto;
+  background: var(--bg-2); border: 1px solid var(--line-2);
+  border-radius: 18px; padding: 22px;
+  box-shadow: 0 24px 70px rgba(0, 0, 0, 0.5);
+  animation: pop 0.24s var(--ease);
+}
+.modal-box.sm { max-width: 420px; }
+.modal-box.lg { max-width: 780px; }
+.modal-box h3 { margin: 0 0 6px; font-size: 17px; font-weight: 680; }
+.modal-msg { margin: 0 0 20px; font-size: 13.5px; color: var(--fg-2); line-height: 1.65; }
+.modal-body { display: flex; flex-direction: column; gap: 14px; margin-bottom: 20px; }
+.modal-foot { display: flex; justify-content: flex-end; gap: 9px; }
+@keyframes fade { from { opacity: 0; } }
+@keyframes pop { from { opacity: 0; transform: translateY(14px) scale(0.97); } }
+
+/* ---------------------------------------------------------------- Toast */
+
+.toasts { position: fixed; top: 18px; right: 18px; z-index: 100; display: flex; flex-direction: column; gap: 9px; max-width: 380px; }
+.toast {
+  display: flex; align-items: flex-start; gap: 9px;
+  padding: 12px 15px; border-radius: 13px; font-size: 13.5px; line-height: 1.5;
+  background: rgba(13, 20, 32, 0.95); backdrop-filter: blur(14px);
+  border: 1px solid var(--line-2); box-shadow: 0 12px 34px rgba(0, 0, 0, 0.4);
+  animation: slideIn 0.28s var(--ease);
+}
+.toast i { width: 16px; height: 16px; flex: 0 0 16px; margin-top: 1px; }
+.toast.ok i { color: var(--ok); }
+.toast.err i { color: var(--bad); }
+.toast.warn i { color: var(--warn); }
+.toast.err { border-color: rgba(246, 89, 110, 0.32); }
+.toast.out { animation: slideOut 0.3s var(--ease) forwards; }
+@keyframes slideIn { from { opacity: 0; transform: translateX(24px); } }
+@keyframes slideOut { to { opacity: 0; transform: translateX(24px); } }
+@media (max-width: 860px) {
+  .toasts { top: auto; bottom: 84px; left: 14px; right: 14px; max-width: none; }
+}
+
+/* ---------------------------------------------------------------- 演示条 */
+
+.demo-banner {
+  display: flex; align-items: flex-start; gap: 10px;
+  padding: 11px 16px; font-size: 12.5px; line-height: 1.6;
+  color: #f5d78e; background: rgba(245, 181, 68, 0.1);
+  border-bottom: 1px solid rgba(245, 181, 68, 0.24);
+}
+.demo-banner i { width: 15px; height: 15px; flex: 0 0 15px; margin-top: 2px; color: var(--warn); }
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation-duration: 0.01ms !important; transition-duration: 0.01ms !important; }
+}

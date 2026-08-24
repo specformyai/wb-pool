@@ -1,0 +1,200 @@
+/* dropdown.css — 通用下拉选择组件（全部 .dd- 前缀，深色沉浸式） */
+
+.dd {
+  position: relative;
+  display: inline-block;
+  min-width: 0;
+}
+
+/* ---- 按钮态：与 .inp 视觉等价（同高度 / 圆角 / 边框 / 背景） ---- */
+.dd-btn {
+  appearance: none;
+  -webkit-appearance: none;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  min-height: 36px;
+  margin: 0;
+  padding: 6px 10px 6px 12px;
+  font-family: inherit;
+  font-size: 13.5px;
+  line-height: 1.45;
+  text-align: left;
+  color: var(--tx1, var(--fg));
+  background: var(--bg-2, #0d1420);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  cursor: pointer;
+  transition: border-color .16s var(--ease, ease), box-shadow .16s var(--ease, ease);
+}
+.dd-btn:hover { border-color: var(--line-2, var(--line)); }
+.dd-btn:focus-visible,
+.dd.dd-open .dd-btn {
+  outline: none;
+  border-color: var(--acc);
+  box-shadow: 0 0 0 3px rgba(45, 212, 191, .14);
+}
+
+.dd-label {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.dd-label.dd-ph { color: var(--tx3, var(--fg-3)); }
+
+.dd-chev {
+  flex: none;
+  width: 15px;
+  height: 15px;
+  color: var(--tx3, var(--fg-3));
+  transition: transform .18s var(--ease, ease);
+}
+.dd.dd-open .dd-chev { transform: rotate(180deg); }
+
+/* ---- 弹出面板：position: fixed 挂 body，不透明深色玻璃感 ---- */
+.dd-panel {
+  position: fixed;
+  z-index: 1200;
+  display: flex;
+  flex-direction: column;
+  max-height: 300px;
+  overflow: hidden;
+  color-scheme: dark;
+  /* 半透明 + 背景模糊：面板浮在表格上方时透出一点底层层次，
+     和整站的深色沉浸质感一致。不支持 backdrop-filter 的浏览器
+     会走下面的 @supports 回退到不透明底色，否则会变成半透明糊字。 */
+  background: rgba(13, 20, 32, .78);
+  backdrop-filter: blur(16px) saturate(140%);
+  -webkit-backdrop-filter: blur(16px) saturate(140%);
+  border: 1px solid var(--line-2, var(--line));
+  border-radius: 12px;
+  box-shadow: 0 18px 44px rgba(0, 0, 0, .55);
+  opacity: 0;
+  transform: translateY(-4px);
+  transition: opacity .16s var(--ease, ease), transform .16s var(--ease, ease);
+}
+.dd-panel.dd-up { transform: translateY(4px); }   /* 向上弹出时从下方进入 */
+.dd-panel.dd-show { opacity: 1; transform: translateY(0); }
+
+/* ---- 搜索框（选项多于 8 个时出现在面板顶部） ---- */
+.dd-search {
+  flex: none;
+  padding: 8px;
+  border-bottom: 1px solid var(--line);
+}
+.dd-search-inp {
+  display: block;
+  width: 100%;
+  height: 32px;
+  margin: 0;
+  padding: 0 10px;
+  font-family: inherit;
+  font-size: 13px;
+  color: var(--tx1, var(--fg));
+  background: var(--bg-1, rgba(255, 255, 255, .03));
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  outline: none;
+  transition: border-color .16s var(--ease, ease);
+}
+.dd-search-inp:focus { border-color: var(--acc); }
+.dd-search-inp::placeholder { color: var(--tx3, var(--fg-3)); }
+
+/* ---- 选项列表：内部滚动，细深色滚动条 ---- */
+.dd-list {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: 5px;
+  scrollbar-width: thin;
+  scrollbar-color: rgba(255, 255, 255, .14) transparent;
+}
+.dd-list::-webkit-scrollbar { width: 8px; }
+.dd-list::-webkit-scrollbar-track { background: transparent; }
+.dd-list::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, .12);
+  border-radius: 8px;
+}
+.dd-list::-webkit-scrollbar-thumb:hover { background: rgba(255, 255, 255, .22); }
+
+/* ---- 选项行 ---- */
+.dd-opt {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  border-radius: 8px;
+  font-size: 13.5px;
+  line-height: 1.4;
+  color: var(--tx2, var(--fg-2));
+  cursor: pointer;
+  user-select: none;
+  -webkit-user-select: none;
+}
+.dd-opt:not(.dd-dis):hover { background: rgba(255, 255, 255, .05); }
+.dd-opt.dd-hl:not(.dd-dis) { background: rgba(45, 212, 191, .10); }  /* 键盘高亮 */
+
+/* 选中态：左侧 check + 文字用主题色 */
+.dd-check {
+  flex: none;
+  width: 14px;
+  height: 14px;
+  color: var(--acc);
+  opacity: 0;
+}
+/* 不支持背景模糊时退回不透明底色，避免半透明面板压在表格上糊字 */
+@supports not ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
+  .dd-panel { background: #0d1420; }
+}
+
+/* 选中项：✓ + 主题色文字 + 一层中性淡底。
+   底色刻意用白而不用青绿 —— 青绿留给键盘高亮（.dd-hl），
+   两者都用青绿的话高亮落在选中项上就看不出区别了。 */
+.dd-opt[aria-selected="true"] { color: var(--acc); background: rgba(255, 255, 255, .04); }
+.dd-opt[aria-selected="true"] .dd-check { opacity: 1; }
+
+.dd-opt-label {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* hint：右对齐、最弱色、小一号 */
+.dd-hint {
+  flex: none;
+  max-width: 45%;
+  margin-left: auto;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  text-align: right;
+  font-size: 12px;
+  color: var(--tx3, var(--fg-3));
+}
+
+/* 禁用选项：变暗、不可选 */
+.dd-opt.dd-dis {
+  opacity: .35;
+  cursor: not-allowed;
+}
+
+.dd-none {
+  padding: 16px 10px;
+  text-align: center;
+  font-size: 13px;
+  color: var(--tx3, var(--fg-3));
+}
+
+/* ---- 移动端（≤640px）：字号不小于 13px，搜索框 16px 避免 iOS 聚焦缩放 ---- */
+@media (max-width: 640px) {
+  .dd-btn { font-size: 14px; }
+  .dd-opt { font-size: 14px; padding: 10px; }
+  .dd-hint { font-size: 13px; }
+  .dd-search-inp { height: 36px; font-size: 16px; }
+}

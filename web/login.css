@@ -1,0 +1,210 @@
+/* login.css — 登录门样式：深色沉浸背景 + 玻璃质感卡片 */
+
+/* 登录模式下隐藏主界面骨架（侧边栏 / 内容容器），登录成功后由 JS 移除该 class */
+body.login-mode .side,
+body.login-mode #app,
+body.login-mode #view {
+  display: none;
+}
+
+body.login-mode {
+  overflow: hidden;
+}
+
+/* 全屏登录层：大面积柔和径向渐变光斑（青绿 + 蓝，低透明度） */
+.login-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 1000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px 20px;
+  overflow-y: auto;
+  color: var(--fg);
+  background:
+    radial-gradient(620px 420px at 16% 10%, rgba(45, 212, 191, 0.13), rgba(45, 212, 191, 0) 62%),
+    radial-gradient(760px 540px at 86% 90%, rgba(59, 130, 246, 0.13), rgba(59, 130, 246, 0) 62%),
+    radial-gradient(880px 620px at 55% 118%, rgba(45, 212, 191, 0.05), rgba(45, 212, 191, 0) 60%),
+    var(--bg);
+}
+
+/* 玻璃卡片 */
+.login-card {
+  width: 100%;
+  max-width: 384px;
+  margin: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 22px;
+  padding: 38px 32px 30px;
+  border-radius: var(--radius);
+  border: 1px solid var(--line);
+  background: rgba(13, 19, 30, 0.58);
+  backdrop-filter: blur(18px) saturate(140%);
+  -webkit-backdrop-filter: blur(18px) saturate(140%);
+  box-shadow:
+    0 30px 80px rgba(0, 0, 0, 0.5),
+    inset 0 1px 0 rgba(255, 255, 255, 0.04);
+  animation: login-card-in 0.34s ease both;
+}
+
+/* 不支持 backdrop-filter 时回退为不透明底板，避免文字发糊 */
+@supports not (backdrop-filter: blur(1px)) {
+  .login-card {
+    background: var(--bg-1);
+  }
+}
+
+@keyframes login-card-in {
+  from {
+    opacity: 0;
+    transform: translateY(12px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+/* 品牌区：透明 PNG 徽章，不额外加底板 */
+.login-brand {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  text-align: center;
+}
+
+.login-brand img {
+  display: block;
+  width: 52px;
+  height: 52px;
+  margin-bottom: 8px;
+  filter: drop-shadow(0 8px 22px rgba(45, 212, 191, 0.22));
+}
+
+.login-title {
+  margin: 0;
+  font-size: 22px;
+  font-weight: 650;
+  letter-spacing: 0.3px;
+  color: var(--fg);
+}
+
+.login-sub {
+  margin: 0;
+  font-size: 13px;
+}
+
+/* 表单 */
+.login-form {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.login-form .inp {
+  width: 100%;
+}
+
+.login-submit {
+  width: 100%;
+  min-height: 42px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+}
+
+.login-submit svg {
+  width: 16px;
+  height: 16px;
+  flex: none;
+}
+
+/* 错误提示区（默认隐藏） */
+.login-error {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 10px 12px;
+  border-radius: 10px;
+  font-size: 13px;
+  line-height: 1.55;
+  color: var(--bad);
+  background: rgba(239, 68, 68, 0.1);
+  border: 1px solid rgba(239, 68, 68, 0.32);
+}
+
+.login-error[hidden] {
+  display: none;
+}
+
+.login-error svg {
+  width: 15px;
+  height: 15px;
+  flex: none;
+  margin-top: 2px;
+}
+
+/* 后端不可达的错误态 */
+.login-fatal {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+  text-align: center;
+}
+
+.login-fatal > svg {
+  width: 36px;
+  height: 36px;
+  color: var(--warn);
+  stroke-width: 1.7;
+}
+
+.login-fatal-title {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--fg);
+}
+
+.login-fatal-detail {
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.6;
+  word-break: break-all;
+}
+
+.login-fatal .login-submit {
+  margin-top: 8px;
+}
+
+/* 移动端：卡片自适应宽度、左右 20px 边距，输入框与按钮不小于 44px */
+@media (max-width: 640px) {
+  .login-overlay {
+    padding: 20px;
+  }
+
+  .login-card {
+    padding: 30px 22px 24px;
+    gap: 18px;
+  }
+
+  .login-form .inp,
+  .login-submit {
+    min-height: 44px;
+  }
+
+  .login-form .inp {
+    font-size: 16px; /* 防止 iOS 聚焦时自动放大页面 */
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .login-card {
+    animation: none;
+  }
+}

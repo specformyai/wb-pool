@@ -1,0 +1,70 @@
+/* health.css — 概览页「模型健康」：KPI 汇总卡 + 模型卡片网格 */
+
+/* ---------- KPI 汇总卡 ---------- */
+.mh-kpis{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-bottom:14px}
+.mh-kpi{position:relative;min-width:0;padding:16px 18px;background:var(--surface);border:1px solid var(--line);border-radius:var(--r2)}
+.mh-kpi-v{font-size:26px;font-weight:700;line-height:1.2;letter-spacing:-.02em;color:var(--fg);font-variant-numeric:tabular-nums}
+.mh-kpi-l{margin-top:4px;font-size:12px;color:var(--fg-3)}
+.mh-kpi-sub{margin-top:8px;font-size:12px;color:var(--fg-3)}
+.mh-kpi-ic{position:absolute;top:14px;right:14px;display:flex;align-items:center;justify-content:center;width:34px;height:34px;border-radius:10px;background:var(--surface2);color:var(--fg-2)}
+.mh-kpi-ic.warn{color:var(--warn)}
+.mh-ic{width:16px;height:16px}
+
+@media (max-width:1100px){.mh-kpis{grid-template-columns:repeat(2,1fr)}}
+@media (max-width:560px){.mh-kpi{padding:14px}.mh-kpi-v{font-size:22px}}
+
+/* ---------- 卡片网格 ---------- */
+.mh-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(340px,1fr));gap:12px}
+@media (max-width:400px){.mh-grid{grid-template-columns:1fr}}
+
+.mh-card{display:flex;flex-direction:column;min-width:0;overflow:hidden;background:var(--surface2);border:1px solid var(--line);border-radius:var(--r2);transition:border-color .2s var(--ease)}
+.mh-card:hover{border-color:var(--line2)}
+.mh-card.mh-hide{display:none}
+.mh-card-body{display:flex;flex-direction:column;gap:12px;flex:1;min-width:0;padding:14px 16px}
+
+/* 头部：模型名 + 描边状态药丸 */
+.mh-card-h{display:flex;align-items:flex-start;justify-content:space-between;gap:10px}
+.mh-name{min-width:0;font-size:14px;font-weight:600;line-height:1.5;color:var(--fg);word-break:break-all}
+.mh-pill{flex:none;display:inline-flex;align-items:center;gap:5px;padding:2px 10px;border:1px solid;border-color:color-mix(in srgb,currentColor 45%,transparent);border-radius:999px;background:transparent;font-size:12px;line-height:1.6;white-space:nowrap}
+.mh-pill.ok{color:var(--ok)}
+.mh-pill.degraded{color:var(--warn)}
+.mh-pill.bad{color:var(--bad)}
+.mh-pill.idle{color:var(--fg-3)}
+.mh-pill-ic{width:13px;height:13px;flex:none}
+
+/* 元信息行 / 三列指标 */
+.mh-meta{font-size:12px;color:var(--fg-3)}
+.mh-metrics{display:grid;grid-template-columns:repeat(3,1fr);gap:8px}
+.mh-metric{min-width:0}
+.mh-metric-l{margin-bottom:2px;font-size:11px;color:var(--fg-3)}
+.mh-metric-v{font-size:16px;font-weight:600;color:var(--fg);font-variant-numeric:tabular-nums}
+.mh-metric-v.bad{color:var(--bad)}
+
+/* 24 格历史条 */
+.mh-bars-row{display:flex;gap:2px;height:28px}
+.mh-bar{flex:1 1 0;min-width:0;border-radius:1px;transition:opacity .15s var(--ease)}
+.mh-bar:hover{opacity:.65}
+.mh-bar.ok{background:var(--ok)}
+.mh-bar.degraded{background:var(--warn)}
+.mh-bar.bad{background:var(--bad)}
+.mh-bar.idle{background:rgba(255,255,255,.07)}
+.mh-bars-cap{display:flex;justify-content:space-between;margin-top:6px;font-size:11px;color:var(--fg-3)}
+
+/* footer + 可折叠错误摘要 */
+.mh-foot{display:flex;flex-wrap:wrap;justify-content:space-between;gap:4px 12px;padding:10px 16px;border-top:1px solid var(--line);background:rgba(255,255,255,.02);font-size:12px;color:var(--fg-3)}
+.mh-foot-v{color:var(--fg-2);font-variant-numeric:tabular-nums}
+.mh-err{border-top:1px solid var(--line);background:rgba(255,255,255,.02)}
+.mh-err>summary{display:flex;align-items:center;gap:6px;padding:9px 16px;cursor:pointer;list-style:none}
+.mh-err>summary::-webkit-details-marker{display:none}
+.mh-err>summary:focus-visible{outline:1px solid var(--line2);outline-offset:-1px}
+.mh-chev{width:13px;height:13px;flex:none;color:var(--fg-3);transition:transform .2s var(--ease)}
+.mh-err[open] .mh-chev{transform:rotate(90deg)}
+.mh-err-line{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:12px;color:var(--bad)}
+.mh-err-full{margin:0;max-height:160px;overflow:auto;padding:0 16px 12px 35px;white-space:pre-wrap;word-break:break-all;font-size:12px;line-height:1.6;color:var(--bad)}
+
+/* 显示全部 */
+.mh-more{display:flex;justify-content:center;margin-top:14px}
+
+@media (prefers-reduced-motion:reduce){
+  .mh-card,.mh-bar,.mh-chev{transition:none}
+}

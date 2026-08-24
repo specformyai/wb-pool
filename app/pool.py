@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import json
+import re
 import os
 import threading
 import time
@@ -16,9 +17,59 @@ from . import upstream
 from .proxies import is_proxy_error
 
 QUOTA_KEYWORDS = ("quota", "insufficient", "余额", "积分不足", "配额", "exceeded",
-                  "资源包", "11003", "11004", "arrears")
-AUTH_KEYWORDS = ("unauthorized", "401", "invalid_token", "token expired",
-                 "invalid grant", "11140", "forbidden")
+                  "资源包", "arrears", "额度已用尽", "额度不足")
+AUTH_KEYWORDS = ("unauthorized", "invalid_token", "token expired",
+                 "invalid grant", "forbidden", "request illegal")
+
+# 上游业务码 → 分类。**优先用码判，不要在整串里搜裸数字。**
+# 2026-08-24：AUTH_KEYWORDS 里原本有裸 "401"，而上游码 14018（额度已用尽）
+# 的第 2-4 位恰好是 "401"，朴素子串匹配把配额问题判成鉴权失败 → status=dead。
+# dead 没有自愈路径（refresh_token grant 对所有账号恒返 401），4 个还有
+# 余额的号被永久除名。同类碰撞还有 13401/10401/24011/1401/4010。
+QUOTA_CODES = frozenset({11003, 11004, 14018})
+AUTH_CODES = frozenset({11140, 401, 403})
+
+
+def _err_code(err: str) -> int | None:
+    """从错误串里取出上游业务码。
+
+    错误串形态是 main.py 拼的 f"{exc.code}: {exc.msg}"，正常情况下前缀就是码；
+    exc.code 解析失败时前缀是 "None"，此时退回从 JSON 体里捞 "code": N。
+    """
+    head = err.split(":", 1)[0].strip()
+    if head.isdigit():
+        return int(head)
+    m = re.search(r'"code"\s*:\s*(\d+)', err)
+    return int(m.group(1)) if m else None
+
+
+def _has_kw(low: str, words: tuple[str, ...]) -> bool:
+    """纯数字关键词要求非数字边界，避免 '401' 命中 '14018' 这类子串碰撞。"""
+    for w in words:
+        if w.isdigit():
+            if re.search(rf"(?<!\d){re.escape(w)}(?!\d)", low):
+                return True
+        elif w in low:
+            return True
+    return False
+
+
+def classify_error(err: str) -> str:
+    """返回 'quota' | 'auth' | 'other'。码优先，关键词兜底。"""
+    if not err:
+        return "other"
+    code = _err_code(err)
+    if code is not None:
+        if code in QUOTA_CODES:
+            return "quota"
+        if code in AUTH_CODES:
+            return "auth"
+    low = err.lower()
+    if _has_kw(low, QUOTA_KEYWORDS):
+        return "quota"
+    if _has_kw(low, AUTH_KEYWORDS):
+        return "auth"
+    return "other"
 
 EXHAUST_COOLDOWN = 12 * 3600      # 配额耗尽冷却 12h（上游按自然日重置，双次重试窗口）
 REFRESH_AHEAD = 3600              # 过期前 1h 主动刷新
@@ -44,12 +95,34 @@ class Account:
     token_count: int = 0
     credits_spent: float = 0.0
     last_checkin: str = ""
+    # 签到结果留痕（2026-08-23 修）。旧实现只有 last_checkin 日期串，
+    # 一旦被任何路径写成今天，定时任务整天不再复签，于是出现
+    # 「签到有时给分有时不给」。现在把「确认结果」和「标记日期」分开：
+    #   last_checkin_state: granted=真到账 / already=上游确认今天已签 / ""=未确认
+    #   last_checkin_credit: 当天实际到账积分
+    last_checkin_state: str = ""
+    last_checkin_credit: float = 0.0
     note: str = ""
+
+    def checkin_settled(self, today: str) -> bool:
+        """今天的签到是否已经有确定结果。
+
+        仅当日期匹配 **且** 上游给过明确回执（granted/already）才算已完成。
+        日期匹配但 state 为空 = 上次只写了标记没拿到结果 → 允许复签。
+        """
+        return self.last_checkin == today and self.last_checkin_state in ("granted", "already")
 
     def usable(self) -> bool:
         if self.status in ("dead", "disabled"):
             return False
         if self.status == "exhausted" and time.time() < self.cooldown_until:
+            return False
+        # 余额门槛：确认查过余额且为 0 的号不进候选池。
+        # 没有这道门槛时，零余额号照样被 acquire() 轮到，每次都必然返回
+        # 14018 —— 白烧一次上游请求 + 用户看到一次报错，才被 release()
+        # 踢进 exhausted。credits_checked_at==0 表示从没查过余额（新号），
+        # 此时放行，避免因为还没刷过余额就被永久排除。
+        if self.credits_checked_at > 0 and self.credits_total <= 0:
             return False
         return bool(self.access_token)
 
@@ -273,12 +346,16 @@ class AccountPool:
             acc.token_count += max(0, tokens)
             acc.credits_spent = round(acc.credits_spent + max(0.0, credits), 4)
             if error:
-                low = error.lower()
                 acc.last_error = error[:300]
-                if any(k in low for k in QUOTA_KEYWORDS):
+                kind = classify_error(error)
+                if kind == "quota":
                     acc.status = "exhausted"
                     acc.cooldown_until = time.time() + EXHAUST_COOLDOWN
-                elif any(k in low for k in AUTH_KEYWORDS):
+                    # 上游说额度用尽，本地余额不该还挂着正数：归零并标记
+                    # 已核实，这样 usable() 的余额门槛能立刻生效。
+                    acc.credits_total = 0.0
+                    acc.credits_checked_at = time.time()
+                elif kind == "auth":
                     acc.status = "dead"
             else:
                 acc.last_error = ""
@@ -330,7 +407,8 @@ class AccountPool:
         if acc.status in ("dead", "disabled"):
             return {"ok": False, "error": f"account is {acc.status}"}
         today = time.strftime("%Y-%m-%d")
-        if acc.last_checkin == today and not force:
+        # 只有拿到过明确回执才跳过；仅有日期标记（state 为空）说明上次没结果，要复签
+        if acc.checkin_settled(today) and not force:
             return {"ok": False, "skipped": True, "masked": acc.masked(),
                     "error": "今天已签到"}
         res = upstream.daily_checkin(acc.access_token, proxy=proxy)
@@ -345,6 +423,8 @@ class AccountPool:
             if res.get("ok") or res.get("already"):
                 # already = 上游说今天已签到，同样要落 last_checkin
                 acc.last_checkin = today
+                acc.last_checkin_state = "granted" if res.get("ok") else "already"
+                acc.last_checkin_credit = float(res.get("credit") or 0)
                 acc.last_error = ""
             elif not is_proxy_error(res.get("error")):
                 acc.last_error = f"checkin: {res.get('error')}"[:300]
@@ -367,9 +447,11 @@ class AccountPool:
         for acc in self.all():
             if not acc.access_token or acc.status in ("dead", "disabled"):
                 continue
-            if acc.last_checkin == today:
+            if acc.checkin_settled(today):
                 out.append({"phone": acc.phone, "masked": acc.masked(),
-                            "skipped": True, "reason": "already checked in today"})
+                            "skipped": True, "reason": "already checked in today",
+                            "state": acc.last_checkin_state,
+                            "credit": acc.last_checkin_credit})
                 continue
             cur_proxy = proxy
             res = upstream.daily_checkin(acc.access_token, proxy=cur_proxy)
@@ -383,8 +465,15 @@ class AccountPool:
             with self._lock:
                 if res.get("ok") or res.get("already"):
                     acc.last_checkin = today
+                    acc.last_checkin_state = "granted" if res.get("ok") else "already"
+                    acc.last_checkin_credit = float(res.get("credit") or 0)
                     if res.get("already"):
                         acc.last_error = ""
+                elif is_proxy_error(res.get("error")):
+                    # 链路故障：不留任何 checkin 标记，下一轮定时任务会重试。
+                    # 旧实现在这里什么都不做，但 last_checkin 可能已被别处写脏。
+                    if acc.last_checkin == today and not acc.last_checkin_state:
+                        acc.last_checkin = ""
                 elif not is_proxy_error(res.get("error")):
                     # 只有非链路错误才写进账号 last_error
                     acc.last_error = f"checkin: {res.get('error')}"[:300]

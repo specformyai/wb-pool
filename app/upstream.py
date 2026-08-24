@@ -249,7 +249,18 @@ def stream_chat(token: str, payload: dict[str, Any], proxy: str | None = None,
                 code, msg = None, raw[:300]
                 try:
                     j = json.loads(raw)
-                    code, msg = j.get("code"), str(j.get("msg") or j.get("error_msg") or raw)[:300]
+                    # 上游错误码有两种摆法：顶层 {"code":...} 和嵌套
+                    # {"error":{"data":{"code":...}}}。只取顶层会拿到 None，
+                    # 于是 main.py 拼出的 last_error 变成 "None: {整个JSON}" ——
+                    # 整个 JSON 体进了待分类字符串，14018 里的 "401" 子串
+                    # 就会被 AUTH_KEYWORDS 命中，把额度用尽误判成鉴权失败。
+                    inner = ((j.get("error") or {}).get("data") or {}) \
+                        if isinstance(j.get("error"), dict) else {}
+                    code = j.get("code")
+                    if code is None:
+                        code = inner.get("code")
+                    msg = str(j.get("msg") or j.get("error_msg")
+                              or inner.get("msg") or raw)[:300]
                 except Exception:  # noqa: BLE001
                     pass
                 raise UpstreamError(resp.status_code, code, msg, raw[:600])

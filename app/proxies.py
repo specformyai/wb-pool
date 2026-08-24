@@ -22,6 +22,10 @@ DEFAULT_EXITS: dict[int, str] = {
     61007: "HK", 61008: "DE", 61009: "FI", 61010: "JP", 61011: "RU", 61012: "CO",
     61013: "PL", 61014: "TW", 61015: "IT", 61016: "BR",
     60001: "US-s1", 60002: "US-s2", 60003: "US-s3", 60004: "US-s4",
+    # 60005 是后来加的第 5 个 US slot（gost 上一直在跑，这里漏登记）。
+    # 漏一个不只是数字少 1：pick() 永远不会轮到它，探活列表也没有它，
+    # 前端「配置出口」和实际监听端口数长期对不上。
+    60005: "US-s5",
 }
 
 PROBE_TTL = 900.0     # 探活结果缓存 15 分钟
@@ -35,6 +39,20 @@ _PROXY_ERR_HINTS = (
     "proxyerror", "connect tunnel failed", "unable to connect to proxy",
     "connection refused", "all attempts to connect to proxy",
     "cannot connect to proxy",
+    # ---- 链路中断类（2026-08-23 补） ----
+    # resin 节点掉线/限速时，TLS 握手会在中途被切断，httpx/ssl 抛出的是
+    # SSL 层错误而不是 ProxyError。旧实现漏了这一类，于是把出口故障
+    # 记进 acc.last_error，导致余额正常的号也挂着 "balance: [SSL: ...]"
+    # 假报错（实测 8 个号中招，含 active 且余额 199.99 的 4225）。
+    "unexpected_eof_while_reading", "eof occurred in violation of protocol",
+    "handshake operation timed out", "sslerror", "ssl: ",
+    "_ssl.c", "wrong_version_number", "decryption_failed",
+    "bad record mac", "tlsv1", "record layer failure",
+    # 读写超时同样是链路问题，不是账号问题
+    "read operation timed out", "readtimeout", "connecttimeout",
+    "writetimeout", "pooltimeout", "timed out",
+    "server disconnected", "connection reset", "remotedisconnected",
+    "connection aborted", "incompleteread",
 )
 
 
@@ -107,7 +125,11 @@ class ProxyManager:
         def one(item: tuple[int, str]) -> dict[str, Any]:
             port, cc = item
             url = self.url_for(port)
+            # 只给业务探针那一跳计时。取 IP 是另一个站点的往返，
+            # 算进来会让延迟虚高一倍，看不出出口本身快慢。
+            t0 = time.monotonic()
             ok, detail = upstream.probe_proxy(url)
+            ms = int((time.monotonic() - t0) * 1000)
             ip = ""
             if ok:
                 try:
@@ -117,7 +139,7 @@ class ProxyManager:
                 except Exception:  # noqa: BLE001
                     ip = "?"
             return {"port": port, "cc": cc, "ok": ok, "detail": detail,
-                    "ip": ip, "checked_at": time.time()}
+                    "ip": ip, "ms": ms, "checked_at": time.time()}
 
         results: list[dict[str, Any]] = []
         with cf.ThreadPoolExecutor(8) as ex:

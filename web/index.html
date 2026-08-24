@@ -1,489 +1,83 @@
 <!DOCTYPE html>
 <html lang="zh-CN">
 <head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
-<title>wb-pool · WorkBuddy 账号池</title>
-<link rel="icon" type="image/png" sizes="512x512" href="/static/favicon.png">
-<link rel="preconnect" href="https://fonts.googleapis.com">
-<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
-<link rel="stylesheet" href="/static/app.css">
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<title>wb-pool 账号池网关</title>
+<meta name="description" content="wb-pool 账号池网关管理后台" />
+<meta name="robots" content="noindex" />
+<meta name="color-scheme" content="dark" />
+<!-- ico 放在最前给旧浏览器；PNG 给现代浏览器挑更清晰的尺寸。
+     图标是圆形贴边、四角透明，所以不要再加圆角或背景板。 -->
+<link rel="icon" href="/static/favicon.ico" sizes="any" />
+<link rel="icon" type="image/png" sizes="192x192" href="/static/icon-192.png" />
+<link rel="icon" type="image/png" sizes="512x512" href="/static/icon-512.png" />
+<link rel="apple-touch-icon" sizes="180x180" href="/static/apple-touch-icon.png" />
+<meta name="theme-color" content="#070b12" />
+
+<link rel="preconnect" href="https://unpkg.com" />
+<link rel="stylesheet" href="/static/shared.css?v=4a8191e8" />
+<link rel="stylesheet" href="/static/app.css?v=42100693" />
+<link rel="stylesheet" href="/static/pool.css?v=ce81ac5f" />
+<link rel="stylesheet" href="/static/pages.css?v=f0473655" />
+<link rel="stylesheet" href="/static/chat.css?v=ec9ef2d8" />
+<link rel="stylesheet" href="/static/rates.css?v=ca3e6ec3" />
+<!-- 自绘下拉组件：替代原生 select，避免系统绘制的白底展开层 -->
+<link rel="stylesheet" href="/static/login.css?v=4d1291bd" />
+<link rel="stylesheet" href="/static/health.css?v=9d6ac215" />
+<link rel="stylesheet" href="/static/dropdown.css?v=cf99af58" />
+<script src="https://unpkg.com/lucide@0.469.0/dist/umd/lucide.min.js"></script>
 </head>
 <body>
-<div class="grain"></div>
-<div class="glow glow-a"></div>
-<div class="glow glow-b"></div>
 
-<!-- ══════════════ 登录闸门 ══════════════ -->
-<div class="gate" id="gate" hidden>
-  <div class="gate-panel">
-    <div class="gate-mark"><i data-lucide="layers"></i></div>
-    <h1 class="gate-title">wb<em>pool</em></h1>
-    <p class="gate-sub">WorkBuddy 账号池控制台</p>
-    <form class="gate-form" id="gateForm" autocomplete="on">
-      <label class="gate-field">
-        <i data-lucide="user-round"></i>
-        <input id="loginUser" name="username" placeholder="用户名" aria-label="用户名"
-               autocomplete="username" autocapitalize="off" spellcheck="false" required>
-      </label>
-      <label class="gate-field">
-        <i data-lucide="lock"></i>
-        <input id="loginPass" name="password" type="password" placeholder="密码" aria-label="密码"
-               autocomplete="current-password" required>
-        <button type="button" class="gate-eye" id="loginEye" aria-label="显示密码">
-          <i data-lucide="eye"></i>
-        </button>
-      </label>
-      <button class="btn primary gate-submit" type="submit" id="btnLogin">
-        <i data-lucide="log-in"></i>登录
-      </button>
-      <div class="gate-msg" id="gateMsg" role="alert"></div>
-    </form>
-    <div class="gate-foot" id="gateFoot"></div>
-  </div>
+<div class="shell">
+  <nav class="side" id="side"></nav>
+  <main class="main"><div class="view" id="view"></div></main>
 </div>
 
-<div class="app" id="app" hidden>
-<header class="topbar">
-  <div class="brand">
-    <div class="brand-mark"><i data-lucide="layers"></i></div>
-    <div class="brand-text">
-      <span class="brand-name">wb<em>pool</em></span>
-      <span class="brand-sub">WorkBuddy 账号池反向代理</span>
-    </div>
-  </div>
-  <div class="topbar-right">
-    <div class="pill" id="healthPill"><span class="dot"></span><span id="healthTxt">连接中</span></div>
-    <div class="usermenu">
-      <button class="btn ghost usermenu-btn" id="userBtn">
-        <i data-lucide="user-round"></i><span id="userName">—</span>
-        <i data-lucide="chevron-down" class="caret"></i>
-      </button>
-      <div class="usermenu-pop" id="userPop" hidden>
-        <button class="usermenu-item" id="btnOpenPwd"><i data-lucide="key-round"></i>修改密码</button>
-        <button class="usermenu-item danger" id="btnLogout"><i data-lucide="log-out"></i>退出登录</button>
-      </div>
-    </div>
-  </div>
-</header>
+<div class="toasts" id="toasts"></div>
 
-<div class="banner" id="pwdBanner" hidden>
-  <i data-lucide="triangle-alert"></i>
-  <span>当前仍在使用默认密码 <code>admin / admin</code>，面板已暴露在网络上，请立刻修改。</span>
-  <button class="btn ghost" id="btnBannerPwd">立即修改</button>
-</div>
+<!--
+  importmap 做 cache-busting：改了任何模块只要把 BUILD 一改，所有 import
+  的 URL 都变，浏览器必然重新拉取。
+  ES module 有独立的模块图缓存，比 HTTP 缓存顽固得多 —— 只在 index.html 上
+  挂 ?t=xxx 没用（那个查询串不会传递到 import 的模块 URL），发 no-cache
+  响应头也未必穿透（实测改了 shared.js 后页面仍在跑旧版函数）。
+  裸模块名走 importmap 映射，是唯一能一处改动就覆盖全部相互 import 的办法。
+-->
+<script type="importmap">
+{
+  "imports": {
+    "@/shared.js":       "/static/shared.js?v=0a3e8834",
+    "@/router.js":       "/static/router.js?v=64b03ec2",
+    "@/chat.js":         "/static/chat.js?v=2b992240",
+    "@/dropdown.js":     "/static/dropdown.js?v=5e8936b2",
+    "@/health.js":       "/static/health.js?v=794f1767",
+    "@/login.js":        "/static/login.js?v=75cedf7d",
+    "@/overview.js":     "/static/overview.js?v=e78804b8",
+    "@/pages.js":        "/static/pages.js?v=e899a51a",
+    "@/pool.js":         "/static/pool.js?v=14f986c1",
+    "@/rates.js":        "/static/rates.js?v=651f700e",
+    "@/selectify.js":    "/static/selectify.js?v=43162b63",
+    "@/settings.js":     "/static/settings.js?v=eaf81552"
+  }
+}
+</script>
+<script type="module">
+  import { start } from '@/router.js';
+  import { refreshIcons } from '@/shared.js';
+  import { requireLogin } from '@/login.js';
 
-<nav class="tabs" id="tabs">
-  <button class="tab active" data-view="overview"><i data-lucide="gauge"></i><span>总览</span></button>
-  <button class="tab" data-view="accounts"><i data-lucide="users"></i><span>账号池</span></button>
-  <button class="tab" data-view="register"><i data-lucide="smartphone"></i><span>添加账号</span></button>
-  <button class="tab" data-view="models"><i data-lucide="boxes"></i><span>模型与倍率</span></button>
-  <button class="tab" data-view="keys"><i data-lucide="key-round"></i><span>API 密钥</span></button>
-  <button class="tab" data-view="proxy"><i data-lucide="globe"></i><span>出口代理</span></button>
-  <button class="tab" data-view="chat"><i data-lucide="message-square"></i><span>对话调试</span></button>
-  <button class="tab" data-view="api"><i data-lucide="plug"></i><span>接入方式</span></button>
-</nav>
+  // 管理接口只认 wb_session cookie，未登录时每个 /api/* 都会 401，
+  // 所以先过登录门再渲染主界面。requireLogin 内部自己处理三种情况：
+  // 已登录直接放行、未登录渲染表单、后端不可达渲染可重试的错误态。
+  // 它只在确认登录后才 resolve，所以这里 await 完就能安全 start()。
+  (async () => {
+    await requireLogin();
+    refreshIcons();
+    start();
+  })();
+</script>
 
-<main>
-<!-- ══════════════ 总览 ══════════════ -->
-<section class="view active" id="view-overview">
-  <div class="hero">
-    <div class="hero-num" id="heroCredits">—</div>
-    <div class="hero-label">池内可用积分总额</div>
-    <div class="hero-meta">
-      <span><i data-lucide="users"></i><b id="heroUsable">—</b> 可用 / <b id="heroTotal">—</b> 总账号</span>
-      <span><i data-lucide="activity"></i><b id="heroReq">—</b> 次请求</span>
-      <span><i data-lucide="coins"></i><b id="heroSpent">—</b> 已消耗</span>
-    </div>
-    <div class="hero-note" id="heroExcluded" hidden></div>
-  </div>
-
-  <div class="grid-4" id="statCards"></div>
-
-  <div class="card">
-    <div class="card-head">
-      <h2><i data-lucide="activity-square"></i>模型可用性</h2>
-      <div class="head-actions">
-        <div class="seg" id="healthWindow">
-          <button data-h="6">6 小时</button>
-          <button data-h="24" class="on">24 小时</button>
-          <button data-h="168">7 天</button>
-        </div>
-        <label class="inline-check"><input type="checkbox" id="healthOnlyUsed"><span>只看有调用的</span></label>
-        <button class="btn ghost" id="btnHealthRefresh"><i data-lucide="refresh-cw"></i>刷新</button>
-      </div>
-    </div>
-    <div id="healthKpi" class="hk-grid"></div>
-    <p class="hint">按真实调用日志统计，不主动探测上游。观察条每格一个时间桶，左「过去」右「现在」：<span class="lg ok"></span>全成功　<span class="lg degraded"></span>部分失败　<span class="lg bad"></span>多数失败　<span class="lg idle"></span>无调用。</p>
-    <div id="healthList" class="health-list"></div>
-  </div>
-
-  <div class="card">
-    <div class="card-head">
-      <h2><i data-lucide="list"></i>账号状态</h2>
-      <div class="head-actions">
-        <button class="btn ghost" id="btnRefreshBal"><i data-lucide="refresh-cw"></i>刷新余额</button>
-        <button class="btn ghost" id="btnCheckin"><i data-lucide="calendar-check"></i>立即签到</button>
-      </div>
-    </div>
-    <div id="overviewList" class="acc-strip"></div>
-  </div>
-</section>
-
-<!-- ══════════════ 账号池 ══════════════ -->
-<section class="view" id="view-accounts">
-  <div class="card">
-    <div class="card-head">
-      <h2><i data-lucide="users"></i>账号池</h2>
-      <div class="head-actions">
-        <button class="btn ghost on-off" id="btnHideDead">
-          <i data-lucide="eye-off"></i><span id="hideDeadTxt">隐藏不可用</span>
-        </button>
-        <button class="btn ghost" id="btnPoolReload"><i data-lucide="rotate-cw"></i>重载</button>
-        <button class="btn ghost" id="btnPoolBal"><i data-lucide="wallet"></i>刷新余额</button>
-        <button class="btn ghost" id="btnPoolCheckin"><i data-lucide="calendar-check"></i>全部签到</button>
-      </div>
-    </div>
-    <div class="mode-row">
-      <span>外部调用</span>
-      <div class="seg" id="rotationMode">
-        <button data-mode="lru">轮询</button>
-        <button data-mode="drain">优先耗尽</button>
-      </div>
-      <span class="hint" id="rotationHint" style="margin:0"></span>
-      <button class="btn ghost" id="btnRotationSave"><i data-lucide="save"></i>应用</button>
-    </div>
-    <div class="filter-note" id="poolFilterNote" hidden></div>
-    <div class="table-wrap">
-      <table id="poolTable">
-        <thead><tr>
-          <th>账号</th><th>状态</th><th>积分</th><th>已耗</th><th>请求</th>
-          <th>Token 剩余</th><th>注册时间</th><th>签到</th><th>最近错误</th><th>操作</th>
-        </tr></thead>
-        <tbody></tbody>
-      </table>
-    </div>
-  </div>
-
-  <div class="card">
-    <div class="card-head"><h2><i data-lucide="import"></i>手动导入 Token</h2></div>
-    <p class="hint">已经有 access_token（例如从桌面端 CodeBuddy 的 auth 目录取到的）可以直接入池，不必走短信。</p>
-    <div class="form-grid">
-      <label>access_token<textarea id="impAT" rows="3" placeholder="eyJhbGciOi..."></textarea></label>
-      <label>refresh_token（可选，用于自动续期）<textarea id="impRT" rows="2" placeholder="eyJhbGciOi..."></textarea></label>
-      <div class="form-row">
-        <label>标签<input id="impLabel" placeholder="例如 主号"></label>
-        <label>手机号（可选，仅作标识）<input id="impPhone" placeholder="+8613800138000"></label>
-      </div>
-    </div>
-    <button class="btn primary" id="btnImport"><i data-lucide="download"></i>导入并入池</button>
-    <pre class="out" id="impOut"></pre>
-  </div>
-</section>
-
-<!-- ══════════════ 添加账号 ══════════════ -->
-<section class="view" id="view-register">
-
-  <!-- ── 自动注册（uoomsg） ── -->
-  <div class="card">
-    <div class="card-head">
-      <h2><i data-lucide="bot"></i>自动注册（uoomsg 接码）</h2>
-      <button class="btn ghost" id="btnUoomsgBalance"><i data-lucide="wallet"></i>查余额</button>
-    </div>
-    <p class="hint">
-      从 uoomsg 自动取实体卡号 → 腾讯发码 → 等收到验证码 → 自动入池。全程无需人工干预。
-      单任务超过 2 分 30 秒会自动停止并释放号码。
-      <span id="uoomsgBalHint" style="margin-left:8px;color:var(--acc)"></span>
-    </p>
-    <div class="form-row">
-      <label>邀请码（可选）
-        <select id="autoRegInviteSel"><option value="">不填</option></select>
-      </label>
-      <label>或手填邀请码<input id="autoRegInviteManual" placeholder="留空则用左侧所选"></label>
-      <label>标签（可选）<input id="autoRegLabel" placeholder="auto"></label>
-      <label>批量数量<input id="autoRegCount" type="number" min="1" max="20" value="1" inputmode="numeric"></label>
-    </div>
-    <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
-      <button class="btn primary" id="btnAutoReg"><i data-lucide="play"></i>开始自动注册</button>
-      <button class="btn ghost" id="btnAutoRegRefresh"><i data-lucide="refresh-cw"></i>刷新任务列表</button>
-      <button class="btn ghost" id="btnAutoRegClear"><i data-lucide="list-x"></i>清空已结束</button>
-    </div>
-    <div id="autoRegTasks" style="margin-top:12px"></div>
-  </div>
-
-  <div class="card">
-    <div class="card-head"><h2><i data-lucide="smartphone"></i>手动添加账号（自己的号）</h2></div>
-    <p class="hint">
-      填入<strong>你本人的手机号</strong>，服务端走协议向 WorkBuddy 请求短信验证码，
-      你收到后填进第二步即可完成登录并自动入池。仅支持中国大陆 +86 号码。
-    </p>
-
-    <div class="steps">
-      <div class="step" id="step1">
-        <div class="step-idx">1</div>
-        <div class="step-body">
-          <h3>发送验证码</h3>
-          <div class="form-row">
-            <label>手机号<input id="regPhone" placeholder="13800138000 或 +8613800138000" inputmode="tel"></label>
-            <label>标签（可选）<input id="regLabel" placeholder="主号"></label>
-          </div>
-          <div class="form-row">
-            <label>邀请码（可选，注册成功后邀请人得积分）
-              <select id="regInviteSel"><option value="">不填</option></select>
-            </label>
-            <label>或手填邀请码<input id="regInviteManual" placeholder="15 位邀请码，留空则用左侧所选"></label>
-          </div>
-          <div class="hint-inline" id="regInviteHint"></div>
-          <label class="inline-check">
-            <input type="checkbox" id="regUseProxy"><span>通过 resin 出口发起（默认按当前代理模式）</span>
-          </label>
-          <button class="btn primary" id="btnRegStart"><i data-lucide="send"></i>发送验证码</button>
-        </div>
-      </div>
-
-      <div class="step disabled" id="step2">
-        <div class="step-idx">2</div>
-        <div class="step-body">
-          <h3>填入收到的验证码</h3>
-          <div class="code-row">
-            <input id="regCode" placeholder="6 位数字" maxlength="8" inputmode="numeric" class="code-input">
-            <button class="btn primary" id="btnRegFinish" disabled><i data-lucide="log-in"></i>登录并入池</button>
-          </div>
-          <div class="countdown" id="regCountdown"></div>
-        </div>
-      </div>
-    </div>
-    <pre class="out" id="regOut"></pre>
-  </div>
-
-  <div class="card">
-    <div class="card-head">
-      <h2><i data-lucide="gift"></i>邀请码</h2>
-      <button class="btn ghost" id="btnInviteCodes"><i data-lucide="refresh-cw"></i>刷新池内邀请码</button>
-    </div>
-    <p class="hint">
-      注册新号时在上面的下拉里选一个已入池账号的邀请码，注册成功后邀请人拿积分。单账号奖励上限 30000 积分。腾讯不允许一个号绑自己的码。
-    </p>
-    <div class="invite-grid" id="inviteGrid"></div>
-  </div>
-
-  <div class="card">
-    <div class="card-head"><h2><i data-lucide="link-2"></i>给已有账号补绑邀请码</h2></div>
-    <p class="hint">注册当时忘填邀请码的账号可以在这里补绑，只有从没绑过的账号能成功。</p>
-    <div class="form-row">
-      <label>账号<select id="bindPhone"></select></label>
-      <label>邀请码<input id="bindCode" placeholder="15 位邀请码"></label>
-      <button class="btn ghost" id="btnBind"><i data-lucide="link"></i>绑定</button>
-    </div>
-    <pre class="out" id="bindOut"></pre>
-  </div>
-
-  <div class="card">
-    <div class="card-head"><h2><i data-lucide="chart-no-axes-column"></i>邀请明细</h2></div>
-    <div class="form-row">
-      <label>账号<select id="invPhone"></select></label>
-      <button class="btn ghost" id="btnInvite"><i data-lucide="search"></i>查询</button>
-    </div>
-    <pre class="out" id="invOut"></pre>
-  </div>
-
-</section>
-
-<!-- ══════════════ 模型与倍率 ══════════════ -->
-<section class="view" id="view-models">
-  <div class="card">
-    <div class="card-head">
-      <h2><i data-lucide="boxes"></i>可用模型</h2>
-      <div class="head-actions">
-        <button class="btn ghost" id="btnModels"><i data-lucide="refresh-cw"></i>读取缓存</button>
-        <button class="btn primary" id="btnModelsProbe"><i data-lucide="cloud-download"></i>同步上游</button>
-      </div>
-    </div>
-    <p class="hint">直接读官方 console 模型接口（<code>/console/enterprises/personal/models</code> 的 CLI agent 白名单），拿到的就是账号真实可用的模型与积分倍率。缓存 1 小时，失败 5 分钟内不重试并回落静态表，每 6 小时自动刷新。</p>
-    <div id="modelState" class="model-state"></div>
-    <div id="modelGrid" class="model-grid"></div>
-  </div>
-
-  <div class="card">
-    <div class="card-head">
-      <h2><i data-lucide="scale"></i>倍率（实测记账）</h2>
-      <div class="head-actions">
-        <button class="btn ghost" id="btnRates"><i data-lucide="table"></i>查看</button>
-        <button class="btn primary" id="btnMeasure"><i data-lucide="flask-conical"></i>实测一轮</button>
-      </div>
-    </div>
-    <p class="hint">上游同样没有倍率接口。这里的数值是本代理实测得出：固定 prompt 跑一次，等异步结算后用余额差归因。上游结算有延迟，单次可能为 0，多测几轮更准。</p>
-    <div class="table-wrap">
-      <table id="rateTable">
-        <thead><tr><th>模型</th><th>厂商</th><th>消耗 credits</th><th>tokens</th><th>credits / 1k</th><th>相对倍率</th></tr></thead>
-        <tbody></tbody>
-      </table>
-    </div>
-    <pre class="out" id="rateOut"></pre>
-  </div>
-</section>
-
-<!-- ══════════════ API 密钥 ══════════════ -->
-<section class="view" id="view-keys">
-  <div class="card">
-    <div class="card-head">
-      <h2><i data-lucide="key-round"></i>API 密钥</h2>
-      <div class="head-actions">
-        <button class="btn ghost" id="btnKeysRefresh"><i data-lucide="refresh-cw"></i>刷新</button>
-        <button class="btn primary" id="btnKeyNew"><i data-lucide="plus"></i>生成新密钥</button>
-      </div>
-    </div>
-    <p class="hint">
-      这些密钥给<strong>外部客户端调用反代</strong>用（<code>/v1/*</code>），和登录本面板的账号密码是两套东西。
-      可以按用途生成多把、分别停用或删除，用量各自统计。密钥明文只在生成那一刻显示一次，之后只能重新生成。
-    </p>
-
-    <div class="keynew" id="keyNewBox" hidden>
-      <div class="keynew-head"><i data-lucide="party-popper"></i>新密钥已生成，请立即复制保存</div>
-      <div class="keynew-row">
-        <code id="keyNewVal" class="mono"></code>
-        <button class="btn primary" id="btnKeyNewCopy"><i data-lucide="copy"></i>复制</button>
-        <button class="btn ghost" id="btnKeyNewClose"><i data-lucide="x"></i></button>
-      </div>
-    </div>
-
-    <div class="table-wrap">
-      <table id="keyTable">
-        <thead><tr>
-          <th>名称</th><th>密钥</th><th>状态</th><th>请求</th><th>Tokens</th>
-          <th>消耗积分</th><th>最近使用</th><th>创建时间</th><th>操作</th>
-        </tr></thead>
-        <tbody></tbody>
-      </table>
-    </div>
-    <div class="empty" id="keyEmpty" hidden>
-      <i data-lucide="key-round"></i>
-      <p>还没有任何密钥。生成一把后填进客户端的 API Key 栏即可开始调用。</p>
-    </div>
-  </div>
-</section>
-
-<!-- ══════════════ 出口代理 ══════════════ -->
-<section class="view" id="view-proxy">
-  <div class="card">
-    <div class="card-head">
-      <h2><i data-lucide="globe"></i>resin 出口</h2>
-      <div class="head-actions">
-        <button class="btn ghost" id="btnProxyGet"><i data-lucide="refresh-cw"></i>读取</button>
-        <button class="btn primary" id="btnProxyProbe"><i data-lucide="radar"></i>全量探活</button>
-      </div>
-    </div>
-    <p class="hint">探活打的是 <code>copilot.tencent.com</code> 真实业务端点，不是通用探针 —— 有出口能上 ipify 但握不上腾讯的 TLS。</p>
-    <div class="mode-row">
-      <span>模式</span>
-      <div class="seg" id="proxyMode">
-        <button data-mode="off">直连</button>
-        <button data-mode="rotate">轮换出口</button>
-        <button data-mode="fixed">固定</button>
-      </div>
-      <input id="proxyFixedUrl" placeholder="http://127.0.0.1:61010" class="mono">
-      <button class="btn ghost" id="btnProxyMode"><i data-lucide="save"></i>应用</button>
-    </div>
-    <div id="proxyGrid" class="proxy-grid"></div>
-  </div>
-</section>
-
-<!-- ══════════════ 对话调试 ══════════════ -->
-<section class="view" id="view-chat">
-  <div class="card chat-card">
-    <div class="card-head">
-      <h2><i data-lucide="message-square"></i>对话调试</h2>
-      <div class="head-actions">
-        <select id="chatModel" class="mono"></select>
-        <select id="chatAccount" class="mono"></select>
-        <label class="inline-check"><input type="checkbox" id="chatStream" checked><span>流式</span></label>
-        <button class="btn ghost" id="btnChatClear"><i data-lucide="eraser"></i>清空</button>
-      </div>
-    </div>
-    <div class="chat-log" id="chatLog"></div>
-    <div class="chat-attachments" id="chatAttachments" hidden></div>
-    <div class="chat-input" id="chatDropZone">
-      <input id="chatImageInput" type="file" accept="image/png,image/jpeg,image/webp,image/gif" multiple hidden>
-      <button class="btn ghost chat-image-btn" id="btnChatImage" type="button" title="添加图片" aria-label="添加图片">
-        <i data-lucide="image-plus"></i>
-      </button>
-      <textarea id="chatInput" rows="2" placeholder="输入消息，支持粘贴或拖入图片，Ctrl+Enter 发送"></textarea>
-      <button class="btn primary" id="btnChatSend" type="button" title="发送" aria-label="发送"><i data-lucide="send-horizontal"></i></button>
-    </div>
-    <div class="chat-meta" id="chatMeta">单次调试最长等待 120 秒，发送后可随时手动停止</div>
-  </div>
-</section>
-
-<!-- ══════════════ 接入方式 ══════════════ -->
-<section class="view" id="view-api">
-  <div class="card">
-    <div class="card-head"><h2><i data-lucide="plug"></i>接到别的地方用</h2></div>
-    <p class="hint">反代同时提供 OpenAI 与 Anthropic 两套兼容接口，直接填进任何支持自定义 base_url 的客户端。</p>
-    <div class="api-grid">
-      <div class="api-box">
-        <div class="api-label"><i data-lucide="terminal"></i>OpenAI 兼容</div>
-        <div class="kv"><span>Base URL</span><code id="apiBase">—</code></div>
-        <div class="kv"><span>API Key</span><code>在「API 密钥」页生成</code></div>
-        <div class="kv"><span>端点</span><code>/v1/chat/completions · /v1/models</code></div>
-      </div>
-      <div class="api-box">
-        <div class="api-label"><i data-lucide="terminal"></i>Anthropic 兼容</div>
-        <div class="kv"><span>Base URL</span><code id="apiBase2">—</code></div>
-        <div class="kv"><span>Header</span><code>x-api-key: &lt;你生成的密钥&gt;</code></div>
-        <div class="kv"><span>端点</span><code>/v1/messages</code></div>
-      </div>
-    </div>
-    <div class="code-block"><pre id="curlSample"></pre></div>
-  </div>
-</section>
-</main>
-</div><!-- /.app -->
-
-<!-- ══════════════ 修改密码 ══════════════ -->
-<div class="modal" id="pwdModal" hidden>
-  <div class="modal-panel">
-    <div class="modal-head">
-      <h2><i data-lucide="key-round"></i>修改登录密码</h2>
-      <button class="mini" id="pwdClose" aria-label="关闭"><i data-lucide="x"></i></button>
-    </div>
-    <form id="pwdForm">
-      <label>当前密码<input id="pwdOld" type="password" autocomplete="current-password" required></label>
-      <label>新密码（至少 6 位）<input id="pwdNew" type="password" autocomplete="new-password" minlength="6" required></label>
-      <label>再输一次<input id="pwdNew2" type="password" autocomplete="new-password" minlength="6" required></label>
-      <div class="gate-msg" id="pwdMsg" role="alert"></div>
-      <div class="modal-foot">
-        <button type="button" class="btn ghost" id="pwdCancel">取消</button>
-        <button type="submit" class="btn primary"><i data-lucide="check"></i>确认修改</button>
-      </div>
-    </form>
-  </div>
-</div>
-
-<!-- ══════════════ 通用输入 / 确认（替代原生 prompt·confirm） ══════════════ -->
-<div class="modal" id="askModal" hidden>
-  <div class="modal-panel">
-    <div class="modal-head">
-      <h2 id="askHead"><i data-lucide="message-square-text"></i><span id="askTitle"></span></h2>
-      <button class="mini" id="askClose" aria-label="关闭"><i data-lucide="x"></i></button>
-    </div>
-    <form id="askForm">
-      <p class="ask-desc" id="askDesc"></p>
-      <label id="askInputWrap">
-        <span id="askLabel"></span>
-        <input id="askInput" type="text" autocomplete="off">
-      </label>
-      <div class="modal-foot">
-        <button type="button" class="btn ghost" id="askCancel">取消</button>
-        <button type="submit" class="btn primary" id="askOk"><i data-lucide="check"></i><span id="askOkTxt">确定</span></button>
-      </div>
-    </form>
-  </div>
-</div>
-
-<div class="toast-host" id="toastHost"></div>
-<script src="https://unpkg.com/lucide@latest/dist/umd/lucide.js"></script>
-<script src="/static/chat-utils.js"></script>
-<script src="/static/app.js"></script>
 </body>
 </html>

@@ -1,0 +1,298 @@
+/* pages.css —— k3 生成的各页面样式合并产物，勿手工编辑 */
+
+/* ==================== keys-and-rates ==================== */
+/* ===== 两页共用：按钮 / 弹窗 / 错误态（选择器都限定在页面根内，防污染其他页） ===== */
+.page-keys .x-btn,.page-rates .x-btn{display:inline-flex;align-items:center;gap:6px;padding:8px 14px;border-radius:var(--radius);border:1px solid var(--line-2);background:var(--bg-2);color:var(--fg);font-size:13px;cursor:pointer;transition:all var(--ease)}
+.page-keys .x-btn:hover,.page-rates .x-btn:hover{border-color:var(--acc);color:var(--acc)}
+.page-keys .x-btn.pri,.page-rates .x-btn.pri{background:var(--acc);border-color:var(--acc);color:#fff}
+.page-keys .x-btn.pri:hover,.page-rates .x-btn.pri:hover{background:var(--acc-2);color:#fff}
+.page-keys .x-btn.dan:hover,.page-rates .x-btn.dan:hover{border-color:var(--bad);color:var(--bad)}
+.page-keys .x-btn:disabled,.page-rates .x-btn:disabled{opacity:.4;cursor:not-allowed}
+.page-keys .x-btn i,.page-rates .x-btn i{width:14px;height:14px}
+.page-keys .x-btn.sm,.page-rates .x-btn.sm{padding:5px 10px;font-size:12px}
+.page-keys .x-back,.page-rates .x-back{position:fixed;inset:0;background:rgba(0,0,0,.65);backdrop-filter:blur(4px);z-index:60;display:flex;align-items:center;justify-content:center;padding:16px}
+.page-keys .x-box,.page-rates .x-box{background:var(--card);border:1px solid var(--line-2);border-radius:var(--radius);width:100%;max-width:460px;padding:22px}
+.page-keys .x-box h3,.page-rates .x-box h3{margin:0 0 4px;font-size:16px;display:flex;align-items:center;gap:8px}
+.page-keys .x-box h3 i,.page-rates .x-box h3 i{width:18px;height:18px;color:var(--acc)}
+.page-keys .x-sub,.page-rates .x-sub{font-size:12px;color:var(--fg-3);margin-bottom:16px;font-family:monospace}
+.page-keys .x-field,.page-rates .x-field{margin-bottom:12px}
+.page-keys .x-field label,.page-rates .x-field label{display:block;font-size:12px;color:var(--fg-2);margin-bottom:6px}
+.page-keys .x-in,.page-rates .x-in{width:100%;box-sizing:border-box;padding:9px 12px;border-radius:var(--radius);border:1px solid var(--line-2);background:var(--bg);color:var(--fg);font-size:13px;outline:none}
+.page-keys .x-in:focus,.page-rates .x-in:focus{border-color:var(--acc)}
+.page-keys .x-in:disabled,.page-rates .x-in:disabled{opacity:.5;cursor:not-allowed}
+.page-keys .x-acts,.page-rates .x-acts{display:flex;justify-content:flex-end;gap:10px;margin-top:18px}
+.page-keys .x-err,.page-rates .x-err{padding:44px 20px;text-align:center;color:var(--fg-3)}
+.page-keys .x-err i,.page-rates .x-err i{width:32px;height:32px;color:var(--bad);margin-bottom:10px}
+.page-keys .x-err p,.page-rates .x-err p{margin:0 0 14px;font-size:13px}
+.page-keys .x-keyreveal{margin:14px 0;padding:14px;background:var(--bg);border:1px dashed var(--warn);border-radius:var(--radius);font-family:monospace;font-size:13px;word-break:break-all;color:var(--warn);line-height:1.7}
+.page-keys .x-once{display:flex;gap:8px;align-items:flex-start;font-size:12px;color:var(--warn);margin-top:14px}
+.page-keys .x-once i{width:14px;height:14px;flex-shrink:0;margin-top:1px}
+
+/* ===== 页面一：API Key 管理 ===== */
+.page-keys .pk-top{display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap;margin-bottom:14px}
+.page-keys .pk-top h2{margin:0;font-size:18px;display:flex;align-items:center;gap:8px}
+.page-keys .pk-top h2 i{width:20px;height:20px;color:var(--acc)}
+.page-keys .pk-note{display:flex;gap:8px;align-items:center;font-size:12px;color:var(--fg-3);background:var(--card);border:1px solid var(--line);border-radius:var(--radius);padding:9px 12px;margin-bottom:14px}
+.page-keys .pk-note[hidden]{display:none}
+.page-keys .pk-note i{width:14px;height:14px;flex-shrink:0;color:var(--acc-2)}
+.page-keys .pk-stats{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-bottom:16px}
+.page-keys .pk-stat{background:var(--card);border:1px solid var(--line);border-radius:var(--radius);padding:14px 16px}
+.page-keys .pk-stat .k{font-size:12px;color:var(--fg-3);display:flex;align-items:center;gap:6px;margin-bottom:6px}
+.page-keys .pk-stat .k i{width:13px;height:13px}
+.page-keys .pk-stat .v{font-size:20px;font-weight:700}
+.page-keys .pk-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(320px,1fr));gap:14px}
+.page-keys .pk-card{background:var(--card);border:1px solid var(--line);border-radius:var(--radius);padding:16px;transition:border-color var(--ease)}
+.page-keys .pk-card:hover{border-color:var(--line-2)}
+.page-keys .pk-card.off{opacity:.6}
+.page-keys .pk-c1{display:flex;align-items:center;gap:8px;margin-bottom:4px}
+.page-keys .pk-c1 .nm{font-weight:600;font-size:15px;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.page-keys .pk-env{font-size:11px;padding:2px 8px;border-radius:99px;background:var(--bg);color:var(--fg-2);border:1px solid var(--line-2);white-space:nowrap}
+.page-keys .pk-mask{font-family:monospace;font-size:12px;color:var(--fg-3);margin-bottom:12px}
+.page-keys .pk-nums{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-bottom:10px}
+.page-keys .pk-num .n{font-size:15px;font-weight:600}
+.page-keys .pk-num .t{font-size:11px;color:var(--fg-3)}
+.page-keys .pk-meta{font-size:11px;color:var(--fg-3);display:flex;flex-direction:column;gap:3px;margin-bottom:10px}
+.page-keys .pk-note2{font-size:12px;color:var(--fg-2);background:var(--bg);border-radius:var(--radius);padding:7px 10px;margin-bottom:12px;word-break:break-all}
+.page-keys .pk-acts{display:flex;gap:8px;align-items:center;border-top:1px solid var(--line);padding-top:12px}
+.page-keys .pk-acts .sp{flex:1}
+.page-keys .pk-sw{position:relative;width:36px;height:20px;border-radius:99px;background:var(--line-2);border:none;cursor:pointer;transition:background var(--ease);flex-shrink:0;padding:0}
+.page-keys .pk-sw.on{background:var(--ok)}
+.page-keys .pk-sw::after{content:'';position:absolute;top:2px;left:2px;width:16px;height:16px;border-radius:50%;background:#fff;transition:transform var(--ease)}
+.page-keys .pk-sw.on::after{transform:translateX(16px)}
+@media(max-width:768px){.page-keys .pk-stats{grid-template-columns:repeat(2,1fr)}.page-keys .pk-grid{grid-template-columns:1fr}}
+
+/* ===== 页面二：倍率表 ===== */
+.page-rates .pr-top{display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap;margin-bottom:14px}
+.page-rates .pr-top h2{margin:0;font-size:18px;display:flex;align-items:center;gap:8px}
+.page-rates .pr-top h2 i{width:20px;height:20px;color:var(--acc)}
+.page-rates .pr-acts{display:flex;gap:8px}
+.page-rates .pr-note{display:flex;gap:8px;align-items:flex-start;font-size:12px;color:var(--fg-2);background:var(--card);border:1px solid var(--line);border-left:3px solid var(--acc-2);border-radius:var(--radius);padding:10px 12px;margin-bottom:14px;line-height:1.6}
+.page-rates .pr-note[hidden]{display:none}
+.page-rates .pr-note i{width:14px;height:14px;flex-shrink:0;margin-top:2px;color:var(--acc-2)}
+.page-rates .pr-wrap{overflow-x:auto;background:var(--card);border:1px solid var(--line);border-radius:var(--radius)}
+.page-rates table{width:100%;border-collapse:collapse;font-size:13px;min-width:780px}
+.page-rates th{padding:11px 14px;text-align:left;font-size:12px;color:var(--fg-3);font-weight:500;border-bottom:1px solid var(--line);white-space:nowrap;user-select:none}
+.page-rates th.sortable{cursor:pointer}
+.page-rates th.sortable:hover{color:var(--fg)}
+.page-rates th .arw{color:var(--acc);margin-left:2px}
+.page-rates td{padding:12px 14px;border-bottom:1px solid var(--line);vertical-align:middle}
+.page-rates tr:last-child td{border-bottom:none}
+.page-rates tr.lack td{opacity:.45}
+.page-rates .pr-model{font-family:monospace;font-weight:600;display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.page-rates .pr-badge{font-size:10px;padding:2px 7px;border-radius:99px;white-space:nowrap;font-family:inherit;font-weight:400}
+.page-rates .pr-badge.base{background:var(--bg);color:var(--acc-2);border:1px solid var(--line-2)}
+.page-rates .pr-badge.thk{background:var(--bg);color:var(--warn);border:1px solid var(--line-2)}
+.page-rates .pr-mult{display:flex;align-items:center;gap:10px}
+.page-rates .pr-mult b{min-width:52px;font-variant-numeric:tabular-nums}
+.page-rates .pr-bar{height:8px;border-radius:99px;background:var(--bg);width:110px;position:relative;overflow:hidden;flex-shrink:0}
+.page-rates .pr-bar i{position:absolute;top:0;bottom:0;left:0;border-radius:99px;background:linear-gradient(90deg,var(--acc),var(--acc-2))}
+.page-rates .pr-lack{color:var(--fg-3);font-size:12px}
+.page-rates .pr-prog{display:flex;align-items:center;gap:10px;margin-top:6px;font-size:12px;color:var(--fg-2)}
+.page-rates .pr-prog[hidden]{display:none}
+.page-rates .pr-spin{width:16px;height:16px;border:2px solid var(--line-2);border-top-color:var(--acc);border-radius:50%;animation:pr-rot .8s linear infinite;flex-shrink:0}
+@keyframes pr-rot{to{transform:rotate(360deg)}}
+@media(max-width:768px){.page-rates .pr-top{flex-direction:column;align-items:stretch}.page-rates .pr-acts{justify-content:flex-end}}
+
+/* ==================== calls-and-proxy ==================== */
+/* ====== 调用监控 + 代理池（所有选择器均以页面根 class 限定） ====== */
+.page-calls,.page-proxy{padding:20px;color:var(--fg);font-size:13px}
+.page-calls .ph,.page-proxy .ph{display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin-bottom:14px}
+.page-calls h2,.page-proxy h2{margin:0;font-size:16px;display:flex;align-items:center;gap:8px}
+.page-calls .muted{color:var(--fg-3);font-size:12px}
+/* 分段控件：选中态必须是实色胶囊，不能只靠文字亮度区分 */
+.page-calls .seg,.page-proxy .seg{display:flex;gap:2px;padding:3px;background:var(--bg-2);border:1px solid var(--line);border-radius:999px}
+.page-calls .seg button,.page-proxy .seg button{border:0;background:transparent;color:var(--fg-3);font-size:12px;padding:5px 14px;border-radius:999px;cursor:pointer;transition:all var(--ease)}
+.page-calls .seg button:hover,.page-proxy .seg button:hover{color:var(--fg)}
+.page-calls .seg button.on,.page-proxy .seg button.on{background:var(--acc);color:#fff}
+.page-calls .btn,.page-proxy .btn{display:inline-flex;align-items:center;gap:6px;background:var(--bg-2);border:1px solid var(--line-2);color:var(--fg-2);font-size:12px;padding:7px 12px;border-radius:var(--radius);cursor:pointer;transition:all var(--ease)}
+.page-calls .btn:hover,.page-proxy .btn:hover{border-color:var(--acc);color:var(--fg)}
+.page-calls .btn.danger:hover{border-color:var(--bad);color:var(--bad)}
+.page-calls .btn:disabled,.page-proxy .btn:disabled{opacity:.5;pointer-events:none}
+.page-calls .empty,.page-proxy .empty{padding:32px;text-align:center;color:var(--fg-3);border:1px dashed var(--line);border-radius:var(--radius)}
+.page-calls .errbox,.page-proxy .errbox{display:flex;align-items:center;gap:10px;padding:14px 16px;border:1px solid var(--bad);border-radius:var(--radius);color:var(--bad);font-size:12px}
+.page-calls .errbox .btn,.page-proxy .errbox .btn{margin-left:auto}
+/* ---- 调用监控：模型健康卡 ---- */
+.page-calls .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(310px,1fr));gap:12px;margin-bottom:22px}
+.page-calls .mcard{background:var(--card);border:1px solid var(--line);border-radius:var(--radius);padding:14px;transition:border-color var(--ease)}
+.page-calls .mcard.s-bad{border-color:var(--bad);box-shadow:0 0 0 1px var(--bad)}
+.page-calls .mcard.s-idle{opacity:.55}
+.page-calls .mhead{display:flex;align-items:center;gap:8px;margin-bottom:8px}
+.page-calls .mname{font-weight:600;font-size:14px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.page-calls .badge{margin-left:auto;font-size:11px;padding:2px 9px;border-radius:999px;border:1px solid var(--line-2);color:var(--fg-3);white-space:nowrap}
+.page-calls .badge.s-ok{color:var(--ok);border-color:var(--ok)}
+.page-calls .badge.s-degraded{color:var(--warn);border-color:var(--warn)}
+.page-calls .badge.s-bad{color:var(--bad);border-color:var(--bad)}
+.page-calls .mmain{display:flex;align-items:baseline;gap:10px}
+.page-calls .rate{font-size:24px;font-weight:700}
+.page-calls .mcard.s-bad .rate{color:var(--bad)}
+.page-calls .mcard.s-degraded .rate{color:var(--warn)}
+.page-calls .msub{color:var(--fg-3);font-size:12px}
+.page-calls .mmeta{display:flex;flex-wrap:wrap;gap:6px 14px;margin-top:8px;color:var(--fg-2);font-size:12px}
+.page-calls .merr{margin-top:8px;font-size:12px;color:var(--bad);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+/* 迷你时序热条：本页核心可视化，每格一个色块 */
+.page-calls .hstrip{display:flex;gap:2px;margin-top:12px}
+.page-calls .hstrip i{flex:1;min-width:4px;height:18px;border-radius:2px;background:var(--line);position:relative}
+.page-calls .hstrip i.s-ok{background:var(--ok)}
+.page-calls .hstrip i.s-degraded{background:var(--warn)}
+.page-calls .hstrip i.s-bad{background:var(--bad)}
+/* hover 提示该时段 ok/fail，纯 CSS 实现，省去 JS 浮层与定位计算 */
+.page-calls .hstrip i:hover::after{content:attr(data-tip);position:absolute;bottom:calc(100% + 6px);left:50%;transform:translateX(-50%);background:var(--bg-2);border:1px solid var(--line-2);color:var(--fg);font-size:11px;padding:3px 8px;border-radius:4px;white-space:nowrap;pointer-events:none;z-index:10}
+/* 最近调用表 */
+.page-calls .tblwrap{overflow-x:auto;border:1px solid var(--line);border-radius:var(--radius);background:var(--card)}
+.page-calls table{width:100%;min-width:780px;border-collapse:collapse;font-size:12px}
+.page-calls th,.page-calls td{padding:8px 12px;text-align:left;border-bottom:1px solid var(--line);white-space:nowrap}
+.page-calls th{color:var(--fg-3);font-weight:500;background:var(--bg-2)}
+.page-calls tbody tr:last-child td{border-bottom:0}
+/* 失败行整行红底：用 color-mix 从 --bad 派生，不引入新颜色 */
+.page-calls tr.fail td{background:color-mix(in srgb,var(--bad) 10%,transparent)}
+.page-calls .tok,.page-proxy .tok{color:var(--ok)}
+.page-calls .tbad{color:var(--bad)}
+.page-calls .errtxt{display:inline-block;max-width:200px;overflow:hidden;text-overflow:ellipsis;vertical-align:bottom;color:var(--bad);cursor:pointer}
+.page-calls .errtxt.open{max-width:none;white-space:normal}
+/* ---- 代理池 ---- */
+.page-proxy .statbar{display:flex;flex-wrap:wrap;gap:14px 28px;background:var(--card);border:1px solid var(--line);border-radius:var(--radius);padding:12px 16px;margin-bottom:14px;color:var(--fg-3);font-size:12px}
+.page-proxy .statbar b{display:block;color:var(--fg);font-size:15px;margin-bottom:2px}
+.page-proxy .note{display:flex;align-items:center;gap:8px;padding:10px 14px;margin-bottom:14px;border:1px solid var(--line-2);border-radius:var(--radius);color:var(--fg-2);font-size:12px;background:var(--bg-2)}
+.page-proxy .pgrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(170px,1fr));gap:10px;transition:opacity var(--ease)}
+.page-proxy .pgrid.dim{opacity:.45;filter:grayscale(.7);pointer-events:none}
+.page-proxy .pcard{background:var(--card);border:1px solid var(--line);border-radius:var(--radius);padding:12px;font-size:12px}
+.page-proxy .prow{display:flex;align-items:center;gap:8px;margin-bottom:6px}
+.page-proxy .dot{width:8px;height:8px;border-radius:50%;background:var(--fg-3);flex:none}
+.page-proxy .dot.ok{background:var(--ok)}
+.page-proxy .dot.bad{background:var(--bad)}
+.page-proxy .tag{margin-left:auto;font-size:10px;padding:1px 7px;border-radius:999px;background:var(--acc);color:#fff}
+.page-proxy .spin{margin-left:auto;animation:pxspin 1s linear infinite;color:var(--fg-3)}
+@keyframes pxspin{to{transform:rotate(360deg)}}
+.page-proxy .pip{color:var(--fg);font-family:monospace;margin-bottom:4px}
+.page-proxy .pms{color:var(--fg-3)}
+.page-proxy .perr{color:var(--bad)}
+/* 地区标签（后端 cc 字段，如 US-s1 / HK / RO）：紧跟端口号，弱化处理不抢焦点 */
+.page-proxy .pcc{padding:1px 6px;border-radius:5px;background:var(--surface2,rgba(255,255,255,.06));
+  color:var(--fg-2);font-size:10.5px;letter-spacing:.3px;white-space:nowrap}
+/* 出口通但取 IP / 计时缺失时的占位，比直接显示 — 更准确 */
+.page-proxy .dim{color:var(--fg-3);opacity:.75}
+@media(max-width:768px){
+  .page-calls,.page-proxy{padding:14px}
+  .page-calls .grid,.page-proxy .pgrid{grid-template-columns:1fr}
+  .page-calls .ph,.page-proxy .ph{gap:8px}
+}
+
+/* ==================== reg ==================== */
+/* ===== page-reg 注册中心 ===== */
+
+/* 纵向流式布局，tab 与内容区间距统一 */
+.page-reg{display:flex;flex-direction:column;gap:18px}
+.reg-pane{display:flex;flex-direction:column;gap:18px}
+.reg-pane[hidden]{display:none}
+.page-reg .reg-tabs{align-self:flex-start}
+.page-reg .reg-tabs button{display:inline-flex;align-items:center;gap:6px}
+.page-reg .card-h h3{display:flex;align-items:center;gap:8px}
+
+/* —— 自动注册顶部：余额卡 + 启动表单 —— */
+.reg-auto-top{display:grid;grid-template-columns:300px 1fr;gap:18px}
+.reg-balance-v{font-size:32px;font-weight:700;color:var(--acc);font-variant-numeric:tabular-nums;letter-spacing:.5px}
+.reg-balance-sub{margin-top:6px;font-size:12px;color:var(--fg-3)}
+#regBalanceBody .note{margin:0}
+
+/* 表单横排，窄屏折成单列 */
+.reg-form{display:flex;gap:14px;align-items:flex-end;flex-wrap:wrap}
+.reg-form .field{flex:1;min-width:180px}
+.reg-form .field.count{flex:0 1 130px;min-width:110px}
+.reg-form .btn{flex-shrink:0}
+
+/* shared 只定义了 .field>input，select 补一套同款深色样式 */
+.page-reg .field select{width:100%;appearance:none;background:var(--bg-2);border:1px solid var(--line);border-radius:10px;color:var(--fg);padding:9px 34px 9px 12px;font-size:13.5px;outline:none;cursor:pointer;background-image:url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='14' height='14' viewBox='0 0 24 24' fill='none' stroke='%2393a2b8' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'><path d='m6 9 6 6 6-6'/></svg>");background-repeat:no-repeat;background-position:right 10px center;transition:border-color .2s var(--ease)}
+.page-reg .field select:focus{border-color:var(--acc)}
+.page-reg .field input.err{border-color:var(--bad)}
+.field-err{margin-top:6px;font-size:12px;color:var(--bad)}
+
+/* —— 任务卡 —— */
+.reg-tasks-head{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap}
+.reg-tasks-head h3{font-size:15px;font-weight:600}
+.reg-tasks-head .acts{display:flex;gap:8px}
+.reg-tasks{display:flex;flex-direction:column;gap:12px}
+.reg-task{cursor:pointer;transition:border-color .25s var(--ease)}
+.reg-task:hover{border-color:var(--line-2)}
+.reg-task-h{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+.reg-task-id{font-size:13px;color:var(--fg-2)}
+.reg-task-h .spacer{flex:1}
+.reg-task .bar{margin:12px 0 10px}
+.reg-task-meta{display:flex;flex-wrap:wrap;gap:6px 18px;font-size:12.5px;color:var(--fg-2)}
+.reg-task-meta b{color:var(--fg);font-weight:600}
+.reg-task-meta .t-ok b{color:var(--ok)}
+.reg-task-meta .t-bad b{color:var(--bad)}
+.reg-task-cur{flex-basis:100%;color:var(--fg-3)}
+
+/* 日志区：等宽 + 限高滚动；新日志吸底由 JS 控制 */
+.reg-logs{margin-top:12px;padding-top:12px;border-top:1px solid var(--line)}
+.reg-logs pre{margin:0;max-height:240px;overflow:auto;padding:10px 12px;background:var(--bg-2);border:1px solid var(--line);border-radius:10px;font:12px/1.7 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;color:var(--fg-2);white-space:pre-wrap;word-break:break-all;cursor:text}
+
+/* —— 手动注册会话行 —— */
+.reg-sessions{display:flex;flex-direction:column;gap:10px}
+.reg-sess{display:flex;flex-wrap:wrap;align-items:center;gap:10px 14px;padding:12px 14px;background:var(--bg-2);border:1px solid var(--line);border-radius:12px}
+.reg-sess-info{display:flex;align-items:center;gap:10px;flex:1;min-width:200px;flex-wrap:wrap}
+.reg-sess-phone{font-size:14px}
+.reg-sess-time{font-size:12px;color:var(--fg-3)}
+.reg-sess-err{flex-basis:100%;font-size:12px;color:var(--bad)}
+.reg-sess-ops{display:flex;align-items:center;gap:8px}
+.reg-sess-ops .field{margin:0;width:130px}
+
+@media (max-width:768px){
+  .reg-auto-top{grid-template-columns:1fr}
+  .reg-form{flex-direction:column;align-items:stretch}
+  .reg-form .field.count{flex:1}
+  .reg-sess{flex-direction:column;align-items:stretch}
+  .reg-sess-ops{width:100%}
+  .reg-sess-ops .field{flex:1;width:auto}
+}
+
+/* ==================== invite ==================== */
+/* ===== 邀请返利页（.page-invite） ===== */
+.page-invite{display:flex;flex-direction:column;gap:16px}
+.page-invite .invite-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(330px,1fr));gap:14px;align-items:start}
+.page-invite .invite-grid>.err-state,.page-invite .invite-grid>.empty-state,.page-invite .iv-skel{grid-column:1/-1}
+.page-invite .iv-skel{padding:16px}
+.page-invite .invite-cell{display:flex;flex-direction:column;gap:10px;min-width:0}
+
+/* 邀请卡 */
+.page-invite .invite-card{cursor:pointer;transition:border-color .25s var(--ease),box-shadow .25s var(--ease),opacity .25s var(--ease)}
+.page-invite .invite-card:hover{border-color:var(--line-2)}
+.page-invite .invite-card.open{border-color:var(--acc)}
+.page-invite .invite-card.capped{border-color:rgba(245,181,68,.55);box-shadow:0 0 0 1px rgba(245,181,68,.22)}
+.page-invite .invite-card.disabled{opacity:.45;cursor:not-allowed}
+.page-invite .invite-card.disabled:hover{border-color:var(--line)}
+
+.page-invite .ic-top{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.page-invite .ic-phone{font-size:15px;font-weight:600}
+.page-invite .ic-chev{width:16px;height:16px;margin-left:auto;color:var(--fg-3);transition:transform .25s var(--ease),color .25s var(--ease)}
+.page-invite .invite-card.open .ic-chev{transform:rotate(180deg);color:var(--acc)}
+
+.page-invite .ic-code{display:flex;align-items:center;gap:8px;margin-top:14px}
+.page-invite .ic-code b{font-size:20px;font-weight:700;letter-spacing:1.5px;color:var(--acc)}
+.page-invite .ic-link{display:flex;align-items:center;gap:6px;margin-top:8px;font-size:12px;color:var(--fg-3)}
+.page-invite .ic-link svg{width:13px;height:13px;flex:none}
+.page-invite .ic-link span{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.page-invite .ic-err{display:flex;align-items:center;gap:8px;margin-top:14px;font-size:13px;color:var(--bad)}
+.page-invite .ic-err svg{width:15px;height:15px;flex:none}
+
+.page-invite .ic-meta{display:flex;justify-content:space-between;align-items:center;gap:8px;margin-top:14px;font-size:12px;color:var(--fg-2)}
+.page-invite .ic-meta b{color:var(--fg)}
+/* 返利进度条加高，把「9,000 / 30,000」叠在条上 */
+.page-invite .ic-bar{position:relative;margin-top:10px}
+.page-invite .ic-bar .bar{height:18px}
+.page-invite .ic-bar>span{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;font-size:11px;color:var(--fg);text-shadow:0 1px 3px rgba(0,0,0,.65);pointer-events:none}
+
+/* 卡片下方展开的好友明细 */
+.page-invite .iv-detail-body{padding:12px 14px}
+.page-invite .iv-detail-head{display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:10px;font-size:13px;font-weight:600}
+.page-invite .iv-detail-meta{font-weight:400;font-size:12px;color:var(--fg-3)}
+
+/* 绑定弹窗挂在 body 下，不在 .page-invite 内，所以这组类不套页面前缀 */
+.iv-modal-title{margin:0 0 14px;font-size:16px;font-weight:700}
+.iv-select{width:100%;padding:9px 12px;background:var(--bg-2);border:1px solid var(--line);border-radius:10px;color:var(--fg);font-size:13px;outline:none;transition:border-color .2s var(--ease)}
+.iv-select:focus{border-color:var(--acc)}
+.iv-select:disabled{opacity:.5}
+
+@media (max-width:768px){
+  .page-invite .invite-grid{grid-template-columns:1fr}
+}

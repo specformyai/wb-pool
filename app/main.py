@@ -280,7 +280,7 @@ async def chat_completions(request: Request) -> Any:
         except _EmptyUpstreamStream:
             last_err = "上游返回空流"
             _log_call(request, model=model, ok=False, endpoint="chat", t0=t0,
-                      account=acc.masked(), error=last_err, stream=want_stream)
+                      account=acc.masked(), error=last_err, stream=want_stream, code=502)
             if force_key:
                 raise HTTPException(502, {"error": {"message": last_err, "type": "upstream_error"}})
             pool.release(acc, error=last_err)
@@ -288,7 +288,7 @@ async def chat_completions(request: Request) -> Any:
         except Exception as exc:       # noqa: BLE001
             last_err = str(exc)[:200]
             _log_call(request, model=model, ok=False, endpoint="chat", t0=t0,
-                      account=acc.masked(), error=last_err, stream=want_stream)
+                      account=acc.masked(), error=last_err, stream=want_stream, code=502)
             if force_key:
                 raise HTTPException(502, {"error": {"message": last_err, "type": "upstream_error"}})
             # 代理链路故障：拉黑该出口，换出口重试，不污染账号 last_error
@@ -315,11 +315,11 @@ async def chat_completions(request: Request) -> Any:
                     _log_call(request, model=model, ok=True, endpoint="chat", t0=t0,
                               tokens=tk, credits=credit, account=acc.masked(), stream=True,
                               t_first=t_first,
-                              out_tokens=(usage or {}).get("completion_tokens", 0))
+                              out_tokens=(usage or {}).get("completion_tokens", 0), code=200)
                 except Exception as exc:  # noqa: BLE001
                     pool.release(acc, error=str(exc)[:200])
                     _log_call(request, model=model, ok=False, endpoint="chat", t0=t0,
-                              account=acc.masked(), error=str(exc)[:200], stream=True)
+                              account=acc.masked(), error=str(exc)[:200], stream=True, code=502)
                     yield _sse({"error": {"message": str(exc)[:200], "type": "upstream_error"}})
                     yield "data: [DONE]\n\n"
 
@@ -336,7 +336,7 @@ async def chat_completions(request: Request) -> Any:
         except Exception as exc:  # noqa: BLE001
             pool.release(acc, error=str(exc)[:200])
             _log_call(request, model=model, ok=False, endpoint="chat", t0=t0,
-                      account=acc.masked(), error=str(exc)[:200])
+                      account=acc.masked(), error=str(exc)[:200], code=502)
             raise HTTPException(502, f"上游流中断: {exc}"[:200])
 
         credit = ledger.record(model, usage)
@@ -344,7 +344,7 @@ async def chat_completions(request: Request) -> Any:
         pool.release(acc, tokens=tk, credits=credit)
         _log_call(request, model=model, ok=True, endpoint="chat", t0=t0,
                   tokens=tk, credits=credit, account=acc.masked(),
-                  t_first=t_first, out_tokens=(usage or {}).get("completion_tokens", 0))
+                  t_first=t_first, out_tokens=(usage or {}).get("completion_tokens", 0), code=200)
         msg: dict[str, Any] = {"role": "assistant", "content": content}
         if reasoning:
             msg["reasoning_content"] = reasoning
@@ -662,7 +662,7 @@ async def anthropic_messages(request: Request) -> Any:
         err = "上游返回空流"
         pool.release(acc, error=err)
         _log_call(request, model=model, ok=False, endpoint="messages", t0=t0,
-                  account=acc.masked(), error=err, stream=want_stream)
+                  account=acc.masked(), error=err, stream=want_stream, code=502)
         return _anthropic_error_response(502, err)
     except Exception as exc:  # noqa: BLE001
         err = str(exc)[:200]
@@ -672,7 +672,7 @@ async def anthropic_messages(request: Request) -> Any:
         else:
             pool.release(acc, error=err)
         _log_call(request, model=model, ok=False, endpoint="messages", t0=t0,
-                  account=acc.masked(), error=err, stream=want_stream)
+                  account=acc.masked(), error=err, stream=want_stream, code=502)
         return _anthropic_error_response(502, f"上游失败: {err}")
 
     if want_stream:
@@ -754,7 +754,7 @@ async def anthropic_messages(request: Request) -> Any:
                 _log_call(request, model=model, ok=True, endpoint="messages", t0=t0,
                           tokens=total_tokens, credits=credit,
                           account=acc.masked(), stream=True, t_first=t_first,
-                          out_tokens=(usage or {}).get("completion_tokens", 0))
+                          out_tokens=(usage or {}).get("completion_tokens", 0), code=200)
                 logged = True
                 yield _anthropic_event({
                     "type": "message_delta",
@@ -770,7 +770,7 @@ async def anthropic_messages(request: Request) -> Any:
                     released = True
                 if not logged:
                     _log_call(request, model=model, ok=False, endpoint="messages", t0=t0,
-                              account=acc.masked(), error=err, stream=True)
+                              account=acc.masked(), error=err, stream=True, code=502)
                     logged = True
                 yield _anthropic_event({
                     "type": "error",
@@ -788,7 +788,7 @@ async def anthropic_messages(request: Request) -> Any:
                     released = True
                 if not logged:
                     _log_call(request, model=model, ok=False, endpoint="messages", t0=t0,
-                              account=acc.masked(), error="client_disconnected", stream=True)
+                              account=acc.masked(), error="client_disconnected", stream=True, code=499)
 
         return StreamingResponse(a_stream(), media_type="text/event-stream",
                                  headers={"Cache-Control": "no-cache",
@@ -802,7 +802,7 @@ async def anthropic_messages(request: Request) -> Any:
         err = str(exc)[:200]
         pool.release(acc, error=err)
         _log_call(request, model=model, ok=False, endpoint="messages", t0=t0,
-                  account=acc.masked(), error=err)
+                  account=acc.masked(), error=err, code=502)
         return _anthropic_error_response(502, f"上游流中断: {err}")
 
     content_blocks: list[dict[str, Any]] = []
@@ -826,7 +826,7 @@ async def anthropic_messages(request: Request) -> Any:
     _log_call(request, model=model, ok=True, endpoint="messages", t0=t0,
               tokens=total_tokens, credits=credit,
               account=acc.masked(), t_first=t_first,
-              out_tokens=(usage or {}).get("completion_tokens", 0))
+              out_tokens=(usage or {}).get("completion_tokens", 0), code=200)
     return {
         "id": mid, "type": "message", "role": "assistant", "model": model,
         "content": content_blocks,
@@ -979,7 +979,10 @@ def api_calls_health(window_h: int = 24, buckets: int = 24,
             known = [m["id"] for m in (probe_models().get("models") or [])]
         except Exception:  # noqa: BLE001
             known = []
-    return calllog.health(window_h=window_h, buckets=buckets, known_models=known)
+    _h = calllog.health(window_h=window_h, buckets=buckets, known_models=known)
+    # 前端 pages.js 读 d.generated_at 显示「更新于 X」，缺了就是「—」
+    _h["generated_at"] = time.time()
+    return _h
 
 
 @app.get("/api/calls/recent", dependencies=[Depends(require_admin)])
@@ -1005,6 +1008,9 @@ def get_pool() -> dict[str, Any]:
             "request_count": a.request_count, "token_count": a.token_count,
             "last_used": a.last_used, "last_error": a.last_error,
             "last_checkin": a.last_checkin, "registered_at": a.registered_at,
+            # 签到回执状态（granted=真到账 / already=上游确认已签 / ""=未确认）
+            "last_checkin_state": a.last_checkin_state,
+            "last_checkin_credit": a.last_checkin_credit,
             "expires_at": a.expires_at, "expires_in_h": round(a.expires_in() / 3600, 1),
             "cooldown_until": a.cooldown_until,
         })
@@ -1483,30 +1489,19 @@ if STATIC_DIR.exists():
     app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
 
-def _asset_ver() -> str:
-    """按 app.css / app.js 的 mtime 生成版本号。
-
-    StaticFiles 只发 ETag/Last-Modified，浏览器（尤其带 SW 或强缓存的）改完前端
-    还会拿旧文件，看着像"改了没生效"。给 URL 带上随文件变化的 v= 参数，
-    发版后第一次请求必然 miss，不用叫用户清缓存。
-    """
-    ts = 0.0
-    for name in ("app.css", "app.js", "chat-utils.js", "favicon.png"):
-        f = STATIC_DIR / name
-        if f.exists():
-            ts = max(ts, f.stat().st_mtime)
-    return hex(int(ts))[2:] or "0"
-
-
 @app.get("/", response_class=HTMLResponse)
 def index() -> HTMLResponse:
+    """吐出 SPA 入口。
+
+    前端资源的 cache-busting 由构建脚本负责：bump_version.py 按文件内容
+    哈希把 ?v=<sha1> 写进 index.html 的 importmap 和 <link>。后端不再
+    额外插 mtime —— 那会和已有的 ?v= 撞成两个问号把 URL 弄坏，而且 mtime
+    在 rsync 后会无谓变化，内容哈希才是真的"内容变了才失效"。
+
+    index.html 自己必须 no-store，否则用户拿到旧 HTML 就永远看不到新哈希。
+    """
     f = STATIC_DIR / "index.html"
     if f.exists():
-        html = f.read_text(encoding="utf-8")
-        v = _asset_ver()
-        html = (html.replace("/static/app.css", f"/static/app.css?v={v}")
-                    .replace("/static/chat-utils.js", f"/static/chat-utils.js?v={v}")
-                    .replace("/static/app.js", f"/static/app.js?v={v}")
-                    .replace("/static/favicon.png", f"/static/favicon.png?v={v}"))
-        return HTMLResponse(html, headers={"Cache-Control": "no-store"})
+        return HTMLResponse(f.read_text(encoding="utf-8"),
+                            headers={"Cache-Control": "no-store"})
     return HTMLResponse("<h1>wb-pool</h1><p>WebUI 未安装</p>")
