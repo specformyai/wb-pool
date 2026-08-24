@@ -50,6 +50,15 @@ function normalizeAccount(raw, idx) {
   else if (['disabled', 'disable', 'off', 'inactive', 'paused', 'stopped'].includes(st)) { statusKey = 'disabled'; statusText = '已禁用'; }
   else if (['error', 'banned', 'failed', 'invalid', 'expired', 'dead', 'cooldown'].includes(st)) { statusKey = 'error'; statusText = '异常'; }
 
+  // status=active 但后端 usable=false：账号没被停用、也没封号，
+  // 只是余额门槛把它挡出了候选池（零余额号最常见）。
+  // 不单独标出来的话它会混在「正常」里，用户以为调度还在用它。
+  // 后端 /api/pool 每个账号都带 usable，缺字段时（老版本后端）不生效，保持原分类。
+  if (statusKey === 'active' && raw.usable === false) {
+    statusKey = 'depleted';
+    statusText = (Number(raw.credits_total) || 0) <= 0 ? '额度耗尽' : '不可用';
+  }
+
   // 余额：多字段兜底。后端 GET /api/pool 实际返回 credits_total（不是 balance/credits），
   // k3 原版漏了这个字段名，导致余额列恒为 —、总余额恒为 0。
   const balRaw = raw.credits_total ?? raw.balance ?? raw.credits ?? raw.points;
@@ -93,7 +102,7 @@ function fmtHours(h) {
 }
 
 // ---------- 视图计算：筛选 + 排序 ----------
-const STATUS_ORDER = { active: 0, error: 1, disabled: 2, other: 3 };
+const STATUS_ORDER = { active: 0, depleted: 1, error: 2, disabled: 3, other: 4 };
 function viewAccounts() {
   const q = state.q.trim().toLowerCase();
   const list = state.accounts.filter(a => {
@@ -135,6 +144,8 @@ function statusHtml(a) {
 }
 function opsHtml(a, withText = false) {
   const dis = a.phone ? '' : 'disabled';
+  // 只有真正被停用的号才给「启用」；depleted 是余额门槛挡的，
+  // 它并没有被停用，仍应显示「禁用」按钮（别改成 === 'active'）。
   const togg = a.statusKey === 'disabled' ? ['enable', '启用'] : ['disable', '禁用'];
   const b = (act, icon, label, cls = '') =>
     `<button class="icon-btn ${cls}" type="button" data-act="${act}" data-phone="${escapeHtml(a.phone)}"
@@ -251,6 +262,7 @@ function renderStats() {
   const sum = state.stats.credits_total != null
     ? Number(state.stats.credits_total)
     : list.filter(a => a.statusKey === 'active').reduce((s, a) => s + (a.balance || 0), 0);
+  const depleted = list.filter(a => a.statusKey === 'depleted').length;
   const risk = list.filter(a => a.hours != null && a.hours < 24).length; // 含已过期
   const card = (icon, label, value, cls = '') => `<div class="stat ${cls}">
       <div class="stat-ic"><i data-lucide="${icon}"></i></div>
@@ -259,6 +271,9 @@ function renderStats() {
     card('layers', '账号总数', total) +
     card('zap', '活跃账号', active) +
     card('coins', '总余额', fmtYuan(sum)) +
+    // 额度耗尽：没被停用但调度不会用它，和「需关注」分开列，
+    // 否则用户在「活跃账号」里看不出这批号其实是空的
+    (depleted ? card('battery-low', '额度耗尽', depleted, 'warn') : '') +
     card('shield-alert', '需关注', risk, risk ? 'warn' : '');
   refreshIcons();
 }
@@ -731,6 +746,7 @@ const TEMPLATE = `<section class="pool-page" id="poolPage">
     <div class="chips" id="statusChips">
       <button class="chip on" type="button" data-v="all">全部</button>
       <button class="chip" type="button" data-v="active">正常</button>
+      <button class="chip" type="button" data-v="depleted">额度耗尽</button>
       <button class="chip" type="button" data-v="disabled">已禁用</button>
       <button class="chip" type="button" data-v="error">异常</button>
     </div>

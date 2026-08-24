@@ -237,6 +237,8 @@
 .pill.st-active { color: var(--ok); border-color: rgba(52, 211, 153, 0.35); background: rgba(52, 211, 153, 0.08); }
 .pill.st-disabled { color: var(--tx2); border-color: rgba(148, 163, 184, 0.3); background: rgba(148, 163, 184, 0.07); }
 .pill.st-error, .pill.st-bad { color: var(--bad); border-color: rgba(246, 89, 110, 0.4); background: rgba(246, 89, 110, 0.08); }
+/* 额度耗尽：琥珀色 —— 既不是绿色(能用)也不是红色(坏号)，它只是暂时没额度 */
+.pill.st-depleted { color: #fbbf24; border-color: rgba(251, 191, 36, 0.38); background: rgba(251, 191, 36, 0.09); }
 .pill.st-other { color: #6ea8ff; border-color: rgba(110, 168, 255, 0.35); background: rgba(110, 168, 255, 0.08); }
 
 /* 余额可视化 */
@@ -293,8 +295,11 @@
   box-shadow: 0 18px 50px -12px rgba(0, 0, 0, 0.7);
   transition: transform 0.35s var(--ease);
   max-width: calc(100vw - 24px);
+  /* 隐藏态必须屏蔽指针：translate(140%) 只推 75.6px，配合 bottom:22px
+     浮条底边仍距视口底 0.4px，不设 none 会有一条 54px 高的透明条拦鼠标 */
+  pointer-events: none;
 }
-.batch-bar.show { transform: translate(-50%, 0); }
+.batch-bar.show { transform: translate(-50%, 0); pointer-events: auto; }
 .batch-count { font-size: 13px; font-weight: 600; color: var(--acc); white-space: nowrap; padding-left: 4px; }
 .batch-ops { display: flex; align-items: center; gap: 6px; overflow-x: auto; }
 
