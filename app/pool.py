@@ -102,6 +102,13 @@ class Account:
     #   last_checkin_credit: 当天实际到账积分
     last_checkin_state: str = ""
     last_checkin_credit: float = 0.0
+    # 连续签到天数（上游 daily-checkin 返回 streak_days）。旧实现拿到就丢了。
+    last_checkin_streak: int = 0
+    # 每日签到奖励实际到账留痕（2026-08-26 加）。上游在 00:03~00:21 自动把
+    # 签到积分发成「裂变包」，比签到 cron 早，daily_checkin 只回 credit=0，
+    # 于是面板上永远是 0。这两个字段由 refresh_balances() 从包体反推。
+    daily_grant_credit: float = 0.0
+    daily_grant_date: str = ""
     note: str = ""
 
     def checkin_settled(self, today: str) -> bool:
@@ -381,6 +388,10 @@ class AccountPool:
                 if bal.get("total", -1) >= 0:
                     acc.credits_total = bal["total"]
                     acc.credits_checked_at = time.time()
+                    # 今日签到奖励到账额（从包体反推，见 upstream.get_balance）
+                    if bal.get("daily_grant_at"):
+                        acc.daily_grant_credit = float(bal.get("daily_grant") or 0)
+                        acc.daily_grant_date = str(bal["daily_grant_at"])[:10]
                     if acc.status == "exhausted" and bal["total"] > 1:
                         acc.status = "active"
                         acc.cooldown_until = 0.0
@@ -425,6 +436,8 @@ class AccountPool:
                 acc.last_checkin = today
                 acc.last_checkin_state = "granted" if res.get("ok") else "already"
                 acc.last_checkin_credit = float(res.get("credit") or 0)
+                if res.get("streak_days") is not None:
+                    acc.last_checkin_streak = int(res.get("streak_days") or 0)
                 acc.last_error = ""
             elif not is_proxy_error(res.get("error")):
                 acc.last_error = f"checkin: {res.get('error')}"[:300]
@@ -467,6 +480,8 @@ class AccountPool:
                     acc.last_checkin = today
                     acc.last_checkin_state = "granted" if res.get("ok") else "already"
                     acc.last_checkin_credit = float(res.get("credit") or 0)
+                    if res.get("streak_days") is not None:
+                        acc.last_checkin_streak = int(res.get("streak_days") or 0)
                     if res.get("already"):
                         acc.last_error = ""
                 elif is_proxy_error(res.get("error")):

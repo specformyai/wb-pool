@@ -162,6 +162,9 @@ def get_balance(token: str, proxy: str | None = None,
                     "used": float(a.get("CapacityUsed") or 0),
                     "cycle_end": a.get("CycleEndTime"),
                     "unit": a.get("CapacityUnit") or "credits",
+                    "cycle_start": a.get("CycleStartTime"),
+                    "size": float(a.get("CycleCapacitySizePrecise") or 0),
+                    "status": a.get("Status"),
                 } for a in accs]
                 # 账号在腾讯侧的真实注册时间。
                 # 上游没有 user/info 之类端点（实测 16 条路径全 404），
@@ -179,8 +182,26 @@ def get_balance(token: str, proxy: str | None = None,
                     cts = [int(a.get("CreateTime") or 0) for a in accs]
                     cts = [c for c in cts if c > 0]
                     created_ms = min(cts) if cts else 0
+                # 今日签到奖励实际到账额。上游把签到积分发成
+                # 「CodeBuddy个人版国内运营裂变包」（SubProductName=赠送包），
+                # 发放时刻 00:03~00:21 早于本地签到 cron，于是 daily_checkin
+                # 只回 10001「今天已签到」、credit=0，面板上看不到任何数字。
+                # 所以「今天签到给了多少」必须从包体反推：今天新发的裂变包面额之和。
+                _today = time.strftime("%Y-%m-%d")
+                _grant, _grant_at = 0.0, ""
+                for p in pkgs:
+                    cs = str(p.get("cycle_start") or "")
+                    if not cs.startswith(_today):
+                        continue
+                    if "裂变包" not in str(p.get("name") or ""):
+                        continue
+                    _grant += p["size"]
+                    if not _grant_at or cs < _grant_at:
+                        _grant_at = cs
                 return {
                     "total": round(sum(p["remain"] for p in pkgs), 4),
+                    "daily_grant": round(_grant, 4),
+                    "daily_grant_at": _grant_at,
                     "packages": pkgs,
                     "raw_total_count": data.get("TotalCount"),
                     "total_dosage": data.get("TotalDosage"),

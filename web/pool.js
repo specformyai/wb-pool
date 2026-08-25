@@ -80,6 +80,15 @@ function normalizeAccount(raw, idx) {
     statusKey, statusText,
     hours,
     lastCheckin: parseTs(raw.last_checkin ?? raw.last_checkin_at ?? raw.checkin_at ?? raw.checked_at),
+    // 今日签到奖励实际到账（后端 refresh_balances 从裂变包体反推）。
+    // 不要用 last_checkin_credit —— 上游自动发放比签到 cron 早，那个字段常年是 0。
+    grantCredit: Number(raw.daily_grant_credit ?? 0) || 0,
+    grantDate: String(raw.daily_grant_date ?? ''),
+    // 归属日由后端判定（daily_grant_today）。不能在前端比日期串：
+    // 后端按服务器 CST 写日期，浏览器按自己时区算今天，跨时区会整天错一天。
+    // ?? 而非 || ：false 是有效值，用 || 会在「确实不是今天」时错误回退。
+    grantToday: raw.daily_grant_today ?? (String(raw.daily_grant_date ?? '') === todayStr()),
+    streak: Number(raw.last_checkin_streak ?? 0) || 0,
     packages: fmtPackages(raw.packages ?? raw.package),
     maxBal: 1, balTier: 'none', // 统一在 loadPool 中计算
   };
@@ -118,11 +127,27 @@ function viewAccounts() {
     balance: (a, b) => (a.balance ?? -1) - (b.balance ?? -1),
     expiry:  (a, b) => (a.hours ?? Infinity) - (b.hours ?? Infinity),
     checkin: (a, b) => (a.lastCheckin ?? 0) - (b.lastCheckin ?? 0),
+    grant:   (a, b) => (a.grantToday ? a.grantCredit : 0) - (b.grantToday ? b.grantCredit : 0),
   }[key] || (() => 0);
   return list.sort((a, b) => cmp(a, b) * dir);
 }
 
 // ---------- 片段模板 ----------
+// 本地日期串 YYYY-MM-DD，用来判断后端给的到账日期是不是「今天」。
+// 用 toISOString() 会按 UTC 算，东八区凌晨会整天错一天。
+function todayStr() {
+  const d = new Date();
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+}
+// 今日签到到账 + 连续签到天数。
+// 到账额来自 daily_grant_credit（裂变包面额），streak 来自上游 streak_days
+// —— 后者只在真正 granted 的那次签到返回，所以可能为 0，此时只显示金额。
+function grantHtml(a) {
+  if (!a.grantToday || !(a.grantCredit > 0)) return '<span class="muted">—</span>';
+  const streak = a.streak > 0
+    ? `<span class="pill mini st-active">连续 ${a.streak} 天</span>` : '';
+  return `<div class="grant"><span class="grant-v">+${fmtYuan(a.grantCredit)}</span>${streak}</div>`;
+}
 function balHtml(a) {
   const pct = a.balance != null && a.maxBal > 0
     ? Math.max(0, Math.min(100, (a.balance / a.maxBal) * 100)) : 0;
@@ -163,6 +188,7 @@ function rowHtml(a) {
     <td><div class="acc-phone">${escapeHtml(a.phone) || '—'}</div>${a.label ? `<div class="acc-label">${escapeHtml(a.label)}</div>` : ''}</td>
     <td>${statusHtml(a)}</td>
     <td>${balHtml(a)}</td>
+    <td>${grantHtml(a)}</td>
     <td class="c-pkg" title="${escapeHtml(a.packages)}">${escapeHtml(a.packages) || '<span class="muted">—</span>'}</td>
     <td>${expHtml(a)}</td>
     <td class="muted">${a.lastCheckin ? fmtAgo(a.lastCheckin) : '—'}</td>
@@ -181,6 +207,7 @@ function cardHtml(a) {
     ${balHtml(a)}
     <div class="ac-meta">
       <div><span class="k">Token 有效期</span>${expHtml(a)}</div>
+      <div><span class="k">今日签到</span>${grantHtml(a)}</div>
       <div><span class="k">最近签到</span><span class="muted">${a.lastCheckin ? fmtAgo(a.lastCheckin) : '—'}</span></div>
       <div class="span2"><span class="k">套餐</span>${escapeHtml(a.packages) || '—'}</div>
     </div>
@@ -195,7 +222,7 @@ function emptyHtml(colspan) {
   return colspan ? `<tr><td colspan="${colspan}"><div class="empty">${inner}</div></td></tr>` : `<div class="empty">${inner}</div>`;
 }
 function skeletonRows(n = 5) {
-  return Array.from({ length: n }, () => `<tr>${Array.from({ length: 8 },
+  return Array.from({ length: n }, () => `<tr>${Array.from({ length: 9 },
     () => '<td><div class="skl" style="width:70%"></div></td>').join('')}</tr>`).join('');
 }
 function skeletonCards(n = 3) {
@@ -208,6 +235,7 @@ const COLS = [
   { key: 'phone', label: '账号', sort: true },
   { key: 'status', label: '状态', sort: true },
   { key: 'balance', label: '余额', sort: true },
+  { key: 'grant', label: '今日签到', sort: true },
   { key: 'packages', label: '套餐', sort: false },
   { key: 'expiry', label: 'Token 有效期', sort: true },
   { key: 'checkin', label: '最近签到', sort: true },
@@ -263,6 +291,11 @@ function renderStats() {
     ? Number(state.stats.credits_total)
     : list.filter(a => a.statusKey === 'active').reduce((s, a) => s + (a.balance || 0), 0);
   const depleted = list.filter(a => a.statusKey === 'depleted').length;
+  // 今日签到实际到账总额。这是「签到到底给没给分」的唯一可见口径：
+  // 上游把奖励发成裂变包（中位存活 13 小时，白天就被作废），
+  // 只看余额会以为从来没给过。
+  const grantSum = list.reduce((s, a) => s + (a.grantToday ? (a.grantCredit || 0) : 0), 0);
+  const grantN = list.filter(a => a.grantToday && a.grantCredit > 0).length;
   const risk = list.filter(a => a.hours != null && a.hours < 24).length; // 含已过期
   const card = (icon, label, value, cls = '') => `<div class="stat ${cls}">
       <div class="stat-ic"><i data-lucide="${icon}"></i></div>
@@ -271,6 +304,7 @@ function renderStats() {
     card('layers', '账号总数', total) +
     card('zap', '活跃账号', active) +
     card('coins', '总余额', fmtYuan(sum)) +
+    card('gift', `今日签到到账 · ${grantN} 号`, fmtYuan(grantSum), grantSum > 0 ? 'ok' : '') +
     // 额度耗尽：没被停用但调度不会用它，和「需关注」分开列，
     // 否则用户在「活跃账号」里看不出这批号其实是空的
     (depleted ? card('battery-low', '额度耗尽', depleted, 'warn') : '') +

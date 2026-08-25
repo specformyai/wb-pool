@@ -460,3 +460,13 @@
     scroll-behavior: auto !important;
   }
 }
+
+/* 今日签到到账（2026-08-26）。上游把签到奖励发成裂变包、白天就作废，
+   只看余额看不出签到给过分，所以单列一栏用 --ok 高亮金额。
+   变量只用 shared.css 里 grep 证实存在的：--ok / --fg-3 / --line-2 */
+.grant { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.grant-v { color: var(--ok); font-weight: 600; font-variant-numeric: tabular-nums; }
+.stat.ok .stat-ic { color: var(--ok); }
+@media (max-width: 720px) {
+  .grant { gap: 4px; }
+}

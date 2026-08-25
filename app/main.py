@@ -1011,6 +1011,15 @@ def get_pool() -> dict[str, Any]:
             # 签到回执状态（granted=真到账 / already=上游确认已签 / ""=未确认）
             "last_checkin_state": a.last_checkin_state,
             "last_checkin_credit": a.last_checkin_credit,
+            "last_checkin_streak": a.last_checkin_streak,
+            # 今日签到奖励实际到账（上游自动发的裂变包，比签到 cron 早，
+            # 所以 last_checkin_credit 常年是 0，真实到账看这里）
+            "daily_grant_credit": a.daily_grant_credit,
+            "daily_grant_date": a.daily_grant_date,
+            # 「是不是今天到账」必须由后端判定：daily_grant_date 是按服务器
+            # 本地时区（CST）写的，前端拿浏览器时区去比字符串会整天错一天
+            # （UTC 浏览器实测 2026-08-26 vs 2026-08-25 → 整列渲染成 —）。
+            "daily_grant_today": a.daily_grant_date == time.strftime("%Y-%m-%d"),
             "expires_at": a.expires_at, "expires_in_h": round(a.expires_in() / 3600, 1),
             "cooldown_until": a.cooldown_until,
         })
