@@ -72,7 +72,9 @@ PROXY_MODE = os.environ.get("WB_PROXY_MODE", "off")   # off | fixed | rotate
 PROXY_HOST = os.environ.get("WB_PROXY_HOST", "127.0.0.1")
 PROXY_FIXED = os.environ.get("WB_PROXY_URL", "")
 CHECKIN_CRON = os.environ.get("WB_CHECKIN_CRON", "5 1 * * *")
-BALANCE_INTERVAL = int(os.environ.get("WB_BALANCE_INTERVAL_MIN", "30"))
+# 余额刷新间隔。30 分钟太长：两次刷新之间余额可能已被打光，
+# 面板显示陈旧正数、调度器照发请求必吃 14018（实测 7460 本地 57.50 / 上游 0）。
+BALANCE_INTERVAL = int(os.environ.get("WB_BALANCE_INTERVAL_MIN", "10"))
 UOOMSG_TOKEN = os.environ.get("WB_UOOMSG_TOKEN", "")
 COOKIE_SECURE = os.environ.get("WB_COOKIE_SECURE", "auto")   # auto | on | off
 
@@ -214,7 +216,9 @@ def _pick_account(force_key: str | None = None) -> Account:
         if not acc:
             raise HTTPException(400, f"指定账号不可用: {err}")
         return acc
-    acc = pool.acquire(proxy=pm.pick())
+    # acquire_verified：对「余额低且数据陈旧」的号先实时核一次余额，
+    # 实测为 0 就换下一个，避免把请求发给已被打光的号（必回 14018）。
+    acc = pool.acquire_verified(proxy=pm.pick())
     if not acc:
         raise HTTPException(503, "账号池中没有可用账号，请先在 WebUI 添加账号")
     return acc

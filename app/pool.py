@@ -26,6 +26,14 @@ AUTH_KEYWORDS = ("unauthorized", "invalid_token", "token expired",
 # 的第 2-4 位恰好是 "401"，朴素子串匹配把配额问题判成鉴权失败 → status=dead。
 # dead 没有自愈路径（refresh_token grant 对所有账号恒返 401），4 个还有
 # 余额的号被永久除名。同类碰撞还有 13401/10401/24011/1401/4010。
+# 请求前实时校验余额的阈值（见 acquire_verified）。
+# 余额刷新是定时的，两次刷新之间余额可能已被打光 —— 本地读到陈旧正数，
+# 调度器照样把请求发过去，必然吃一次 14018。实测 7460：本地 57.50 / 上游 0。
+# 只对「余额低 且 数据陈旧」的号补一次实时查询：余额充裕的号不查，
+# 避免给每个请求都加一次上游 RTT（get_balance 实测约 1.5s）。
+VERIFY_BELOW_CREDITS = float(os.environ.get("WB_VERIFY_BELOW_CREDITS", "150"))
+VERIFY_STALE_SEC = float(os.environ.get("WB_VERIFY_STALE_SEC", "120"))
+
 QUOTA_CODES = frozenset({11003, 11004, 14018})
 AUTH_CODES = frozenset({11140, 401, 403})
 
@@ -371,36 +379,102 @@ class AccountPool:
             self.save()
 
     # ---------------- maintenance ----------------
+    def needs_balance_verify(self, acc: Account) -> bool:
+        """这个号在发请求前该不该补查一次真实余额。
+
+        判据是「余额低 且 数据陈旧」两条同时成立：
+          - credits_checked_at == 0 的新号放行（同 usable() 的逻辑，还没查过）
+          - 余额 > VERIFY_BELOW_CREDITS 的号不查，省掉每请求一次 RTT
+        """
+        if acc.credits_checked_at <= 0:
+            return False
+        if acc.credits_total > VERIFY_BELOW_CREDITS:
+            return False
+        return (time.time() - acc.credits_checked_at) > VERIFY_STALE_SEC
+
+    def refresh_balance(self, acc: Account,
+                        proxy: str | None = None,
+                        retries: int = 2) -> dict[str, Any]:
+        """刷新**单个**账号余额并落库，返回上游 bal dict。
+
+        原先只有复数版 refresh_balances()，而 main.py 的 api_invite_bind
+        一直在调这个单数名字 —— 补绑邀请码成功后必抛 AttributeError。
+        """
+        if not acc.access_token:
+            return {"total": -1.0, "error": "no access_token"}
+        bal = upstream.get_balance(acc.access_token, proxy=proxy, retries=retries)
+        # 代理链路故障：拉黑该出口换一个再试，不污染账号 last_error
+        if bal.get("total", -1) < 0 and is_proxy_error(bal.get("error")) \
+                and self.proxy_mgr:
+            if proxy:
+                self.proxy_mgr.mark_bad(proxy)
+            proxy = self.proxy_mgr.pick()
+            bal = upstream.get_balance(acc.access_token, proxy=proxy, retries=retries)
+        with self._lock:
+            if bal.get("total", -1) >= 0:
+                acc.credits_total = bal["total"]
+                acc.credits_checked_at = time.time()
+                # 今日签到奖励到账额（从包体反推，见 upstream.get_balance）
+                if bal.get("daily_grant_at"):
+                    acc.daily_grant_credit = float(bal.get("daily_grant") or 0)
+                    acc.daily_grant_date = str(bal["daily_grant_at"])[:10]
+                if acc.status == "exhausted" and bal["total"] > 1:
+                    acc.status = "active"
+                    acc.cooldown_until = 0.0
+                # 注册时间以上游为准：腾讯侧体验版套餐的 CreateTime 才是
+                # 账号真实注册时间，本地 add/import 时写的是登录时间，要被覆盖
+                if bal.get("registered_at"):
+                    acc.registered_at = bal["registered_at"]
+            elif not is_proxy_error(bal.get("error")):
+                acc.last_error = f"balance: {bal.get('error', 'unknown')}"[:300]
+        return bal
+
+    def acquire_verified(self, proxy: str | None = None,
+                         mode: str | None = None,
+                         max_tries: int = 4) -> Account | None:
+        """取号，并对「余额低且数据陈旧」的号先实时核一次余额。
+
+        余额刷新是定时的（默认 10 分钟），两次之间余额可能已被打光。
+        本地那个陈旧正数会让 usable() 的余额门槛失效，请求照发、必吃 14018。
+        这里在真发请求前补一次查询，实测为 0 就标 exhausted 换下一个。
+
+        注意：网络请求必须在 self._lock 之外做（refresh_balance 自己按需持锁），
+        否则会把整个池子的调度阻塞掉一个 RTT。
+        """
+        tried: set[str] = set()
+        acc = None
+        for _ in range(max(1, max_tries)):
+            acc = self.acquire(proxy=proxy, mode=mode)
+            if acc is None:
+                return None
+            if acc.phone in tried:
+                # 已经轮回到试过的号，说明候选集就这么大，别死循环
+                return acc
+            tried.add(acc.phone)
+            if not self.needs_balance_verify(acc):
+                return acc
+            bal = self.refresh_balance(acc, proxy=proxy, retries=1)
+            if bal.get("total", -1) < 0:
+                # 查不到（链路故障等）就按原样用，不能凭查询失败误杀好号
+                return acc
+            if bal["total"] > 0:
+                self.save()
+                return acc
+            # 余额实测为 0：本地归零 + 冷却，然后取下一个
+            with self._lock:
+                acc.credits_total = 0.0
+                acc.credits_checked_at = time.time()
+                acc.status = "exhausted"
+                acc.cooldown_until = time.time() + EXHAUST_COOLDOWN
+            self.save()
+        return acc
+
     def refresh_balances(self, proxy: str | None = None) -> list[dict[str, Any]]:
         out = []
         for acc in self.all():
             if not acc.access_token:
                 continue
-            bal = upstream.get_balance(acc.access_token, proxy=proxy, retries=2)
-            # 代理链路故障：拉黑该出口换一个再试，不污染账号 last_error
-            if bal.get("total", -1) < 0 and is_proxy_error(bal.get("error")) \
-                    and self.proxy_mgr:
-                if proxy:
-                    self.proxy_mgr.mark_bad(proxy)
-                proxy = self.proxy_mgr.pick()
-                bal = upstream.get_balance(acc.access_token, proxy=proxy, retries=2)
-            with self._lock:
-                if bal.get("total", -1) >= 0:
-                    acc.credits_total = bal["total"]
-                    acc.credits_checked_at = time.time()
-                    # 今日签到奖励到账额（从包体反推，见 upstream.get_balance）
-                    if bal.get("daily_grant_at"):
-                        acc.daily_grant_credit = float(bal.get("daily_grant") or 0)
-                        acc.daily_grant_date = str(bal["daily_grant_at"])[:10]
-                    if acc.status == "exhausted" and bal["total"] > 1:
-                        acc.status = "active"
-                        acc.cooldown_until = 0.0
-                    # 注册时间以上游为准：腾讯侧体验版套餐的 CreateTime 才是
-                    # 账号真实注册时间，本地 add/import 时写的是登录时间，要被覆盖
-                    if bal.get("registered_at"):
-                        acc.registered_at = bal["registered_at"]
-                elif not is_proxy_error(bal.get("error")):
-                    acc.last_error = f"balance: {bal.get('error', 'unknown')}"[:300]
+            bal = self.refresh_balance(acc, proxy=proxy, retries=2)
             out.append({"phone": acc.phone, "masked": acc.masked(),
                         "total": bal.get("total"), "packages": bal.get("packages", []),
                         "error": bal.get("error")})
