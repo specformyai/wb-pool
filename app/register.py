@@ -35,11 +35,13 @@ SESSION_TTL = 600.0     # 短信验证码 5 分钟有效，会话留 10 分钟
 
 
 class RegisterSession:
-    def __init__(self, phone: str, proxy: str | None):
+    def __init__(self, phone: str, proxy: str | None, origin: str = "manual"):
         self.id = secrets.token_urlsafe(12)
         self.phone = phone
         self.proxy = proxy
+        self.origin = origin      # manual=面板发起 / auto=自动注册任务派生
         self.created_at = time.time()
+        self.last_error = ""      # 最近一次填码失败原因，WebUI 直接展示
         self.state = ""
         _ua  = random_ua()
         _lang = random_accept_language()
@@ -90,14 +92,15 @@ class Registrar:
         return "+86" + p
 
     # ---------------- 阶段一：发码 ----------------
-    def start(self, phone_raw: str, proxy_override: str | None = None) -> dict[str, Any]:
+    def start(self, phone_raw: str, proxy_override: str | None = None,
+              origin: str = "manual") -> dict[str, Any]:
         self._gc()
         phone = self.normalize_phone(phone_raw)
         if not re.fullmatch(r"\+86\d{11}", phone):
             return {"ok": False, "error": "仅支持中国大陆 +86 手机号（上游对其他国家号码一律 400）"}
 
         proxy = proxy_override if proxy_override is not None else self.pm.pick()
-        sess = RegisterSession(phone, proxy)
+        sess = RegisterSession(phone, proxy, origin=origin)
         sess.note(f"号码 {phone}，出口 {proxy or '直连'}")
 
         try:
@@ -187,6 +190,7 @@ class Registrar:
                 if "{{" in detail or not detail:
                     detail = "验证码错误或已过期"
                 keep_session = True
+                sess.last_error = f"验证码校验失败：{detail}"
                 sess.note(f"验证码校验失败：{detail}（会话保留，可直接重填）")
                 return {"ok": False, "error": f"验证码校验失败：{detail}",
                         "session_id": sess.id, "can_retry": True, "log": sess.log}
@@ -259,10 +263,23 @@ class Registrar:
                     s.close()
         return result
 
-    def sessions(self) -> list[dict[str, Any]]:
+    def sessions(self, origin: str = "") -> list[dict[str, Any]]:
+        """origin 为空 = 全部；否则只回该来源的会话。
+
+        state 恒为 waiting_code：会话成功即被 pop，留在字典里的一定还在等码
+        （填错码的会话也刻意保留，上游发码有频率限制）。WebUI 按 state 过滤，
+        缺这个字段时「等待验证码的会话」列表恒为空。
+        """
         self._gc()
+        now = time.time()
         with self._lock:
-            return [{"session_id": s.id, "phone": s.phone,
-                     "age": round(time.time() - s.created_at, 1),
+            return [{"session_id": s.id, "id": s.id, "phone": s.phone,
+                     "state": "waiting_code",
+                     "origin": s.origin,
+                     "created_at": int(s.created_at),
+                     "age": round(now - s.created_at, 1),
+                     "expires_in": max(0, int(SESSION_TTL - (now - s.created_at))),
+                     "error": s.last_error,
                      "proxy": s.proxy or "direct", "log": s.log}
-                    for s in self._sessions.values()]
+                    for s in self._sessions.values()
+                    if not origin or s.origin == origin]

@@ -693,6 +693,7 @@ async function doProbe() {
 /* ==================== reg ==================== */
 /* 后端只会返回这四种状态，映射到徽章样式与文案 */
 const STATE_BADGE = {
+  pending: ['idle', '排队中'],
   running: ['acc', '运行中'],
   done: ['ok', '已完成'],
   failed: ['bad', '失败'],
@@ -840,7 +841,9 @@ function bindAutoForm() {
     btn.disabled = true;
     try {
       const r = await apiFetch('/api/auto_register/start', { method: 'POST', body: { count, invite_code: invite } });
-      toast(`任务 ${r.task_id} 已启动`, 'ok');
+      // 后端一号一任务，返回的是 task_ids 数组；旧代码读 r.task_id 恒为 undefined
+      const ids = r.task_ids || [];
+      toast(ids.length > 1 ? `已启动 ${ids.length} 个注册任务` : `任务 ${ids[0] || ''} 已启动`, 'ok');
       await loadTasks(); // 全量刷一次，syncPolls 会为新的 running 任务挂上轮询
     } catch (e) {
       toast(e.message || '启动失败', 'err');
@@ -1047,7 +1050,8 @@ function scrollLogs(id) {
 /* ---------------- 轮询：只挂 running 任务 ---------------- */
 
 function syncPolls(tasks) {
-  const runningIds = new Set(tasks.filter(t => t.state === 'running').map(t => t.id));
+  // pending 是线程启动前的短暂窗口，也要挂轮询，否则那一段不会自动刷新
+  const runningIds = new Set(tasks.filter(t => t.state === 'running' || t.state === 'pending').map(t => t.id));
   // 已结束/被清掉的任务停掉轮询；没有 running 时这里会把 Map 清空，完全停止请求
   for (const [id, stop] of taskStops) {
     if (!runningIds.has(id)) { stop(); taskStops.delete(id); }
@@ -1062,7 +1066,7 @@ async function pollTask(id) {
     const t = await apiFetch(`/api/auto_register/status/${encodeURIComponent(id)}`);
     if (!alive) return;
     updateTaskCard(t);
-    if (t.state !== 'running') {
+    if (t.state !== 'running' && t.state !== 'pending') {
       const stop = taskStops.get(id);
       if (stop) { stop(); taskStops.delete(id); }
       if (t.state === 'done') toast(`任务 ${id} 已完成`, 'ok');

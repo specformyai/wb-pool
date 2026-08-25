@@ -1132,8 +1132,10 @@ async def api_reg_finish(request: Request) -> dict[str, Any]:
 
 
 @app.get("/api/register/sessions", dependencies=[Depends(require_admin)])
-def api_reg_sessions() -> dict[str, Any]:
-    return {"sessions": registrar.sessions()}
+def api_reg_sessions(all: bool = False) -> dict[str, Any]:
+    # 自动注册任务内部也会创建 RegisterSession。默认只回手动会话，
+    # 否则「手动注册」页会混进自动任务的号，在那里填码会打断正在跑的任务。
+    return {"sessions": registrar.sessions(origin="" if all else "manual")}
 
 
 # ---- 自动注册（uoomsg） ----

@@ -13,6 +13,7 @@ WebUI 通过 /api/auto_register/status/<task_id> 轮询。
 """
 from __future__ import annotations
 
+import re
 import secrets
 import threading
 import time
@@ -27,18 +28,37 @@ TASK_TIMEOUT = 150
 TERMINAL_STATUSES = {"done", "failed", "stopped"}
 
 
+def _strip_ts(line: str) -> str:
+    """去掉日志行首的 [HH:MM:SS]，WebUI 的「当前步骤」只需要正文。"""
+    return re.sub(r"^\[\d{2}:\d{2}:\d{2}\]\s*", "", line or "")
+
+
 class AutoRegTask:
     def __init__(self, task_id: str, invite_code: str = "", label: str = ""):
         self.id = task_id
         self.invite_code = invite_code
         self.label = label
         self.created_at = time.time()
+        self.finished_at = 0.0           # 必须在 status 之前：setter 会读它
         self.deadline = self.created_at + TASK_TIMEOUT
         self.status = "pending"          # pending | running | done | failed | stopped
         self.steps: list[str] = []
         self.result: dict[str, Any] = {}
         self.stop_flag = False           # 外部停止标志
         self.timeout_flag = False
+
+    # status 包一层 property：终态时刻由 setter 统一记录。
+    # `task.status = ...` 的赋值点散布在 _run / _expire / _finish_if_aborted 里共 10 处，
+    # 逐个手写 finished_at 必漏，而 WebUI 的「耗时」列就靠它。
+    @property
+    def status(self) -> str:
+        return self._status
+
+    @status.setter
+    def status(self, value: str) -> None:
+        self._status = value
+        if value in TERMINAL_STATUSES and not self.finished_at:
+            self.finished_at = time.time()
 
     def log(self, msg: str) -> None:
         ts = time.strftime("%H:%M:%S")
@@ -48,13 +68,30 @@ class AutoRegTask:
         return max(0.0, self.deadline - time.time())
 
     def to_dict(self) -> dict[str, Any]:
+        """一个任务 = 一个号，所以 target 恒为 1，进度/成功/失败按这个口径展开。
+
+        state / logs 是 status / steps 的别名：WebUI 读的是前者，
+        旧版只给后者，于是徽章渲染成字面 "undefined"、进度恒 0/0、日志区恒空。
+        旧键名一并保留，curl 脚本与文档不受影响。
+        """
+        terminal = self.status in TERMINAL_STATUSES
         return {
             "id": self.id,
             "status": self.status,
+            "state": self.status,
             "steps": self.steps,
+            "logs": self.steps,
             "result": self.result,
             "age": round(time.time() - self.created_at, 1),
             "timeout_s": TASK_TIMEOUT,
+            "label": self.label,
+            "target": 1,
+            "done": 1 if terminal else 0,
+            "ok": 1 if self.status == "done" else 0,
+            "fail": 1 if self.status == "failed" else 0,
+            "started_at": int(self.created_at),
+            "finished_at": int(self.finished_at) or None,
+            "current": "" if terminal else _strip_ts(self.steps[-1] if self.steps else ""),
         }
 
 
@@ -191,7 +228,7 @@ class AutoRegistrar:
 
             # 2. 发腾讯验证码
             task.log("向腾讯发送短信验证码…")
-            reg_res = self.registrar.start(phone)
+            reg_res = self.registrar.start(phone, origin="auto")
             if self._finish_if_aborted(task, phone, "发码后"):
                 phone = None
                 return
