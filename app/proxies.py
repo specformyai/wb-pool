@@ -1,8 +1,18 @@
 """
-resin/gost 出口代理管理
-=======================
-resin 在 165 上暴露 16 国 HTTP 出口 61001-61016 + 4 个美国 slot 60001-60004。
-所有出口必须打真实业务端点探活 —— 通用探针(ipify)绿灯 ≠ copilot.tencent.com 可用。
+出口代理管理（HTTP 正向代理池）
+==============================
+本模块不假设你用哪套代理软件（gost / resin / squid / 自建都行），也不内置任何
+私有拓扑：**默认出口表是空的**，出口由使用者在面板上添加，或用 autodiscover()
+扫本机端口自动发现。
+
+设计约束（踩过的坑）：
+
+* 出口表必须能运行时改。早期版本把作者自己的 21 个端口写死在 DEFAULT_EXITS 里，
+  别人部署后 pick() 会一直去连一堆不存在的本地端口，探活全红且无从下手。
+  现在那张表降级为 EXAMPLE_EXITS，仅作文档示例，不参与默认注入。
+* 「端口在监听」不等于「这个出口能用」。必须打**真实业务端点**探活 ——
+  通用探针（ipify 之类）绿灯 ≠ 上游 API 可达（中间可能被墙/被上游拉黑）。
+* 探活结果落盘缓存，进程重启不用重新扫一遍。
 """
 from __future__ import annotations
 
@@ -12,21 +22,34 @@ import random
 import threading
 import time
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from . import upstream
 
-# 端口 → 国家标签（resin 平台命名，实际落地国以探活时的出口 IP 为准）
-DEFAULT_EXITS: dict[int, str] = {
+# 出口表默认为空 —— 不预置任何私有拓扑。
+# 出口来源有三条，优先级由 app/settings.py 决定：面板写入 > WB_EXITS 环境变量 > 空。
+DEFAULT_EXITS: dict[int, str] = {}
+
+# 仅作文档/示例用：一套 gost 多国出口长什么样。**不会被自动加载**。
+# 想快速起步可以在面板上「导入示例」，或设 WB_EXITS="61001:RO,61002:US,..."。
+EXAMPLE_EXITS: dict[int, str] = {
     61001: "RO", 61002: "US", 61003: "GB", 61004: "NL", 61005: "FR", 61006: "SG",
     61007: "HK", 61008: "DE", 61009: "FI", 61010: "JP", 61011: "RU", 61012: "CO",
     61013: "PL", 61014: "TW", 61015: "IT", 61016: "BR",
-    60001: "US-s1", 60002: "US-s2", 60003: "US-s3", 60004: "US-s4",
-    # 60005 是后来加的第 5 个 US slot（gost 上一直在跑，这里漏登记）。
-    # 漏一个不只是数字少 1：pick() 永远不会轮到它，探活列表也没有它，
-    # 前端「配置出口」和实际监听端口数长期对不上。
-    60005: "US-s5",
+    60001: "US-s1", 60002: "US-s2", 60003: "US-s3", 60004: "US-s4", 60005: "US-s5",
 }
+
+# autodiscover() 默认扫这些区间。选择依据：常见自建代理落在 1080/3128/8080/8118
+# 以及 gost 惯用的 6xxxx 段。区间可以自己传，别把 1-65535 全扫（慢且吵）。
+DISCOVER_RANGES: tuple[tuple[int, int], ...] = (
+    (1080, 1090), (3128, 3130), (8080, 8082), (8118, 8118),
+    (60001, 60020), (61001, 61020),
+)
+
+# 一次扫描的端口数上限。没有这道闸门时 autodiscover(ranges=((1, 70000),))
+# 会真的去 create_connection 七万次（实测扫完要几分钟、开 64 线程狂敲本机），
+# 面板上一个手滑的输入就能把自己的机器打瘫 —— 开源后这是必须堵死的口子。
+MAX_DISCOVER_PORTS = 4096
 
 PROBE_TTL = 900.0     # 探活结果缓存 15 分钟
 BAD_COOLDOWN = 600.0  # 出口 CONNECT 失败后拉黑 10 分钟
@@ -72,11 +95,16 @@ class ProxyManager:
 
     def __init__(self, mode: str = "off", host: str = "127.0.0.1",
                  fixed_url: str = "", exits: dict[int, str] | None = None,
-                 state_file: str | Path | None = None):
+                 state_file: str | Path | None = None,
+                 on_change: "Callable[[dict[int, str]], None] | None" = None):
         self.mode = mode
         self.host = host
         self.fixed_url = fixed_url
-        self.exits = dict(exits or DEFAULT_EXITS)
+        # exits 为 None 时是空表（DEFAULT_EXITS 本身已是空 dict）——
+        # 绝不在这里塞示例拓扑，否则别人部署后会去连一堆不存在的端口。
+        self.exits = dict(exits) if exits else dict(DEFAULT_EXITS)
+        # 出口表变更时回调（main.py 用它写 settings.json 持久化）
+        self.on_change = on_change
         self.state_file = Path(state_file) if state_file else None
         self._lock = threading.RLock()
         self._probe: dict[int, dict[str, Any]] = {}
@@ -112,6 +140,137 @@ class ProxyManager:
     # ---------- helpers ----------
     def url_for(self, port: int) -> str:
         return f"http://{self.host}:{port}"
+
+    # ---------- 出口表运行时增删（面板用） ----------
+    def _notify(self) -> None:
+        """出口表变了就回调，让上层持久化。回调异常不能影响内存态。"""
+        if not self.on_change:
+            return
+        try:
+            self.on_change(dict(self.exits))
+        except Exception:  # noqa: BLE001
+            pass
+
+    @staticmethod
+    def _valid_port(port: object) -> int:
+        p = int(port)
+        if not (1 <= p <= 65535):
+            raise ValueError(f"端口超出范围: {p}")
+        return p
+
+    def add_exit(self, port: int, label: str = "") -> dict[str, Any]:
+        """加一个出口。已存在则更新标签（幂等，面板重复提交不报错）。"""
+        p = self._valid_port(port)
+        with self._lock:
+            existed = p in self.exits
+            self.exits[p] = (label or "").strip() or f":{p}"
+        self._notify()
+        return {"ok": True, "port": p, "label": self.exits[p],
+                "action": "updated" if existed else "added"}
+
+    def remove_exit(self, port: int) -> dict[str, Any]:
+        """删一个出口，连它的探活记录一起清掉（否则前端仍会渲染这张卡）。"""
+        p = self._valid_port(port)
+        with self._lock:
+            if p not in self.exits:
+                return {"ok": False, "error": f"出口 {p} 不在表里"}
+            self.exits.pop(p, None)
+            self._probe.pop(p, None)   # 关键：探活记录也要清
+        self._save_state()
+        self._notify()
+        return {"ok": True, "port": p, "action": "removed"}
+
+    def set_exits(self, exits: dict[int, str]) -> dict[str, Any]:
+        """整表替换。删掉的出口同样要清探活记录。"""
+        clean = {self._valid_port(k): (str(v).strip() or f":{k}")
+                 for k, v in (exits or {}).items()}
+        with self._lock:
+            gone = set(self._probe) - set(clean)
+            for p in gone:
+                self._probe.pop(p, None)
+            self.exits = clean
+        self._save_state()
+        self._notify()
+        return {"ok": True, "count": len(clean)}
+
+    # ---------- 自动发现 ----------
+    def autodiscover(self, ranges: "tuple[tuple[int, int], ...] | None" = None,
+                     host: str | None = None, add: bool = False,
+                     connect_timeout: float = 0.35) -> dict[str, Any]:
+        """扫端口找可用的 HTTP 代理出口。
+
+        两段式，缺一不可：
+          ① TCP 连得上（快，几百毫秒扫完一批）
+          ② 真实业务探针通过（慢，但「端口开着」不等于「是能用的代理」——
+             可能是别的服务，也可能是连得上但出不去的死代理）
+
+        add=False 时只报告不落表，让用户在面板上挑；add=True 直接全部加入。
+        """
+        import concurrent.futures as cf
+        import socket
+
+        h = host or self.host
+        rgs = ranges or DISCOVER_RANGES
+
+        # 区间必须逐个校验，不能直接 range(lo, hi+1)：
+        #   * (1, 70000)   → 会真去连七万次，把本机打瘫（见 MAX_DISCOVER_PORTS）
+        #   * (9000, 8000) → start>end，range 静默给空集，用户以为「扫过了没找到」
+        #   * (0, 10) / ("a", 5) → 非法端口/类型，socket 层才报错，报得很晚且难懂
+        clean: list[tuple[int, int]] = []
+        for item in rgs:
+            try:
+                lo, hi = int(item[0]), int(item[1])
+            except (TypeError, ValueError, IndexError, KeyError):
+                return {"ok": False,
+                        "error": f"区间格式非法: {item!r}（应为 (start, end) 两个整数）"}
+            if not (1 <= lo <= 65535) or not (1 <= hi <= 65535):
+                return {"ok": False, "error": f"端口超出 1-65535: ({lo}, {hi})"}
+            if lo > hi:
+                return {"ok": False, "error": f"区间起点大于终点: ({lo}, {hi})"}
+            clean.append((lo, hi))
+
+        candidates = sorted({p for lo, hi in clean for p in range(lo, hi + 1)})
+        if len(candidates) > MAX_DISCOVER_PORTS:
+            return {"ok": False,
+                    "error": f"一次最多扫 {MAX_DISCOVER_PORTS} 个端口，"
+                             f"当前 {len(candidates)} 个，请缩小区间"}
+
+        def tcp_open(port: int) -> bool:
+            try:
+                with socket.create_connection((h, port), timeout=connect_timeout):
+                    return True
+            except OSError:
+                return False
+
+        with cf.ThreadPoolExecutor(64) as ex:
+            open_ports = [p for p, ok in
+                          zip(candidates, ex.map(tcp_open, candidates)) if ok]
+
+        # 第二段：逐个打真实业务探针。这一步慢，所以只对开着的端口做。
+        def verify(port: int) -> dict[str, Any]:
+            url = f"http://{h}:{port}"
+            t0 = time.monotonic()
+            ok, detail = upstream.probe_proxy(url)
+            return {"port": port, "ok": ok, "detail": detail,
+                    "ms": int((time.monotonic() - t0) * 1000)}
+
+        found: list[dict[str, Any]] = []
+        if open_ports:
+            with cf.ThreadPoolExecutor(8) as ex:
+                found = list(ex.map(verify, open_ports))
+
+        usable = [r for r in found if r["ok"]]
+        if add and usable:
+            with self._lock:
+                for r in usable:
+                    self.exits.setdefault(r["port"], f":{r['port']}")
+            self._notify()
+
+        return {"ok": True, "host": h,
+                "scanned": len(candidates), "tcp_open": open_ports,
+                "results": found,
+                "usable_ports": [r["port"] for r in usable],
+                "added": [r["port"] for r in usable] if add else []}
 
     def probe_all(self, force: bool = False) -> list[dict[str, Any]]:
         """并发探活所有出口。返回列表，含出口 IP 与目标可达性。"""
@@ -216,12 +375,20 @@ class ProxyManager:
             return self.url_for(ports[self._rr])
 
     def status(self) -> dict[str, Any]:
+        # exits 明细也要给前端：面板要能显示「配置了但还没探测」的出口，
+        # 并且删除按钮需要知道有哪些端口。只给数量的话前端只能瞎猜。
+        with self._lock:
+            exits = [{"port": p, "label": self.exits[p]} for p in sorted(self.exits)]
         return {
             "mode": self.mode,
             "host": self.host,
             "fixed_url": self.fixed_url,
-            "exits_configured": len(self.exits),
+            "exits_configured": len(exits),
+            "exits": exits,
             "usable": self.usable_ports(),
             "probed_at": self._probed_at,
             "results": self.probe_results(),
+            "example_exits": [{"port": p, "label": l}
+                              for p, l in sorted(EXAMPLE_EXITS.items())],
+            "discover_ranges": [list(r) for r in DISCOVER_RANGES],
         }

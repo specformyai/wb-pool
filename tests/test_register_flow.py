@@ -12,6 +12,13 @@ bind 的 camelCase 字段名、绑定失败不能连带丢账号、绑定成功�
 """
 from __future__ import annotations
 
+import os
+import sys
+
+# 让 `python tests/xxx.py` 裸跑就能 import app.*，不依赖 PYTHONPATH。
+# 与 tests/ 下其他测试的既有写法保持一致。
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 import base64
 import json
 import tempfile

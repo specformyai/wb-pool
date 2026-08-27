@@ -35,11 +35,16 @@ SESSION_TTL = 600.0     # 短信验证码 5 分钟有效，会话留 10 分钟
 
 
 class RegisterSession:
-    def __init__(self, phone: str, proxy: str | None, origin: str = "manual"):
+    def __init__(self, phone: str, proxy: str | None, origin: str = "manual",
+                 invite_code: str = ""):
         self.id = secrets.token_urlsafe(12)
         self.phone = phone
         self.proxy = proxy
         self.origin = origin      # manual=面板发起 / auto=自动注册任务派生
+        # 绑邀请码发生在 finish（要先有 access_token），但面板上「选邀请码」在
+        # start 那个表单里。不在会话里存一份，用户选的码到 finish 时就没人记得了
+        # —— 这正是「手动注册选了邀请码却从没绑上」的原因。
+        self.invite_code = (invite_code or "").strip()
         self.created_at = time.time()
         self.last_error = ""      # 最近一次填码失败原因，WebUI 直接展示
         self.state = ""
@@ -93,15 +98,16 @@ class Registrar:
 
     # ---------------- 阶段一：发码 ----------------
     def start(self, phone_raw: str, proxy_override: str | None = None,
-              origin: str = "manual") -> dict[str, Any]:
+              origin: str = "manual", invite_code: str = "") -> dict[str, Any]:
         self._gc()
         phone = self.normalize_phone(phone_raw)
         if not re.fullmatch(r"\+86\d{11}", phone):
             return {"ok": False, "error": "仅支持中国大陆 +86 手机号（上游对其他国家号码一律 400）"}
 
         proxy = proxy_override if proxy_override is not None else self.pm.pick()
-        sess = RegisterSession(phone, proxy, origin=origin)
+        sess = RegisterSession(phone, proxy, origin=origin, invite_code=invite_code)
         sess.note(f"号码 {phone}，出口 {proxy or '直连'}")
+        sess.note(f"邀请码：{sess.invite_code or '不使用（可选）'}")
 
         try:
             # ① state
@@ -142,6 +148,7 @@ class Registrar:
         with self._lock:
             self._sessions[sess.id] = sess
         return {"ok": True, "session_id": sess.id, "phone": phone,
+                "invite_code": sess.invite_code,
                 "expires_in": int(SESSION_TTL), "proxy": proxy or "direct",
                 "message": "验证码已发送，请在 5 分钟内提交", "log": sess.log}
 
@@ -232,12 +239,14 @@ class Registrar:
             ok, how = self.pool.add(acc)
             sess.note(f"入池: {how}")
 
-            # ⑥ 绑邀请码（新号填别人的码，邀请人得奖励）
+            # ⑥ 绑邀请码（新号填别人的码，邀请人得奖励）——可选，不填就跳过
+            # 显式传入优先（自动注册走这条），否则用发码阶段记在会话上的那个。
+            bind_code = (invite_code or "").strip() or sess.invite_code
             invite_result = None
-            if invite_code.strip():
+            if bind_code:
                 from . import invite as invite_mod
-                invite_result = invite_mod.bind(access, invite_code, proxy=sess.proxy)
-                sess.note("邀请码：" + ("绑定成功" if invite_result.get("ok")
+                invite_result = invite_mod.bind(access, bind_code, proxy=sess.proxy)
+                sess.note(f"邀请码 {bind_code}：" + ("绑定成功" if invite_result.get("ok")
                                      else invite_result.get("error", "失败")))
                 if invite_result.get("ok"):
                     time.sleep(3)
@@ -245,6 +254,8 @@ class Registrar:
                     acc.credits_total = bal.get("total", acc.credits_total)
                     self.pool.save()
                     sess.note(f"绑定后余额={bal.get('total')}")
+            else:
+                sess.note("未提供邀请码，跳过绑定")
 
             result = {
                 "ok": True, "action": how, "phone": sess.phone,
@@ -280,6 +291,7 @@ class Registrar:
                      "age": round(now - s.created_at, 1),
                      "expires_in": max(0, int(SESSION_TTL - (now - s.created_at))),
                      "error": s.last_error,
+                     "invite_code": s.invite_code,
                      "proxy": s.proxy or "direct", "log": s.log}
                     for s in self._sessions.values()
                     if not origin or s.origin == origin]

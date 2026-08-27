@@ -838,7 +838,7 @@ const TEMPLATE = `<section class="pool-page" id="poolPage">
       <form id="importForm" novalidate>
         <div class="field">
           <label for="impPhone">手机号 <b>*</b></label>
-          <input id="impPhone" name="phone" type="text" inputmode="tel" placeholder="例如 13800001234" required />
+          <input id="impPhone" name="phone" type="text" inputmode="tel" placeholder="例如 13800138000" required />
         </div>
         <div class="field">
           <label for="impLabel">备注</label>

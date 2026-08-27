@@ -37,6 +37,17 @@ scan_*.py
 verify_*.py
 probe_*.py
 
+# 上面那批 verify_*/probe_*/check_* 通配是为了挡掉根目录的一次性诊断脚本。
+# 但 tests/ 下的验证脚本是项目正式资产（CI 要跑），必须显式放行 ——
+# 否则它们会被静默忽略，本地跑得通、推上去别人却拿不到。
+!tests/verify_*.py
+!scripts/verify_*.py
+
+# 补丁脚本留下的时间戳备份。改代码前备份是对的，但它们是本地回滚用的，
+# 不该进版本库（git 本身就是版本库）。
+*.bak
+*.bak-*
+
 # 账号历史对话导出（含真实对话正文与手机号，绝不入库）
 usage_dump/
 dead_dump*/

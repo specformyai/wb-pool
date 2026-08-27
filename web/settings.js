@@ -13,11 +13,12 @@ import {
   skeleton, errorState, refreshIcons, el, copyText,
 } from '@/shared.js';
 
-const state = { auth: null, cache: null, models: null, jobs: null, err: '', loading: true };
+const state = { auth: null, config: null, cache: null, models: null, jobs: null, err: '', loading: true };
 
 async function loadAll() {
   const jobs = {
     auth: () => apiFetch('/api/auth/state'),
+    config: () => apiFetch('/api/settings'),
     cache: () => apiFetch('/api/admin/models-cache-status'),
     models: () => apiFetch('/api/models'),
     jobs: () => apiFetch('/api/scheduler'),
@@ -139,21 +140,33 @@ function renderJobs(j) {
 /* ---------------------------------------------------------------- 账户安全 */
 
 function renderAuth(a) {
-  const enabled = a.ok ? !!(a.d.enabled ?? a.d.auth_enabled ?? a.d.required) : false;
-  const user = a.ok ? (a.d.user ?? a.d.username ?? '') : '';
+  // 后端 /api/auth/state 只回 logged_in / user / default_password /
+  // must_change_password / users。原来读的 enabled / auth_enabled / required
+  // 三个键**都不存在** —— 徽章恒「未启用鉴权」，还常驻一条假的「没有登录保护」
+  // 警告。WebUI 本来就是强制 session 鉴权的，真正该提醒的是默认密码没改。
+  if (!a.ok) {
+    return `<div class="card"><div class="card-h"><h3>账户安全</h3></div>
+      <div class="err-msg" style="color:var(--bad)">${escapeHtml(a.err)}</div></div>`;
+  }
+  const d = a.d;
+  const user = d.user || '';
+  const isDefault = !!d.default_password;
   return `<div class="card">
     <div class="card-h"><div><h3>账户安全</h3>
       <p>WebUI 登录凭据</p></div>
-      <span class="badge ${enabled ? 'ok' : 'warn'}">${enabled ? '已启用鉴权' : '未启用鉴权'}</span></div>
-    ${!enabled ? `<div class="note warn-note"><i data-lucide="shield-alert"></i>
-      <span>当前后台没有登录保护。如果这个服务暴露在公网上，任何人都能读到账号池和 API Key，
-      建议配置管理员密码后再对外开放。</span></div>` : ''}
-    ${user ? `<div class="kv-grid"><div class="kv"><span>当前登录</span>
-      <b class="mono">${escapeHtml(user)}</b></div></div>` : ''}
+      <span class="badge ${isDefault ? 'warn' : 'ok'}">${isDefault ? '仍是默认密码' : '密码已自定义'}</span></div>
+    ${isDefault ? `<div class="note warn-note"><i data-lucide="shield-alert"></i>
+      <span>当前还在用默认密码，服务端已锁住除登录/改密以外的所有接口。
+      改完密码后功能才会解锁 —— 这道锁是为了避免有人把带默认密码的面板直接暴露到公网。</span></div>` : ''}
+    <div class="kv-grid">
+      ${user ? `<div class="kv"><span>当前登录</span><b class="mono">${escapeHtml(user)}</b></div>` : ''}
+      <div class="kv"><span>管理员账号数</span><b>${fmtInt(d.users)}</b></div>
+    </div>
     <div class="acts" style="display:flex;gap:8px;margin-top:14px">
-      <button class="btn" data-act="passwd"><i data-lucide="key-round"></i><span>修改密码</span></button>
-      ${enabled ? `<button class="btn ghost" data-act="logout">
-        <i data-lucide="log-out"></i><span>退出登录</span></button>` : ''}
+      <button class="btn ${isDefault ? 'primary' : ''}" data-act="passwd">
+        <i data-lucide="key-round"></i><span>${isDefault ? '立即修改密码' : '修改密码'}</span></button>
+      <button class="btn ghost" data-act="logout">
+        <i data-lucide="log-out"></i><span>退出登录</span></button>
     </div>
   </div>`;
 }
@@ -204,6 +217,142 @@ function openPasswordModal(onDone) {
   });
 }
 
+/* ------------------------------------------------------------ 运行时配置 */
+
+/* 每项配置的中文说明。key 与后端 SPEC 一一对应（spec_view() 给出全集），
+   这里只补人类可读的标题/提示 —— 类型、范围、可选值一律用后端给的，
+   前端不再抄一份 schema（抄了就会在后端改动后静默错配）。 */
+const CFG_META = {
+  uoomsg_token: {
+    title: '接码平台 Token',
+    hint: '自动注册要用它取手机号收验证码。没有就只能手动注册（自己的手机号）。',
+    group: '接码平台',
+  },
+  proxy_mode:  { title: '代理模式', hint: 'off 直连；fixed 固定一个；rotate 在出口表里轮换。', group: '网络出口' },
+  proxy_host:  { title: '出口主机', hint: '代理监听在哪台机器上，通常是本机。', group: '网络出口' },
+  proxy_url:   { title: '固定代理地址', hint: '仅 fixed 模式用，形如 http://127.0.0.1:8080。', group: '网络出口' },
+  proxy_exits: { title: '出口表', hint: '轮换用的端口清单，在「代理池」页增删。', group: '网络出口' },
+  checkin_cron: { title: '签到时间', hint: '五段 cron。上游常在 00:03~00:21 就把奖励发成裂变包，签到只会拿到「今天已签到」。', group: '定时任务' },
+  balance_interval_min: { title: '余额刷新间隔', hint: '单位分钟。太长会让面板显示陈旧余额，调度器照发请求必吃额度用尽。', group: '定时任务' },
+  timezone: { title: '时区', hint: '「今天」按这个时区算 —— 签到判重、今日到账都依赖它。改完要重启才彻底生效。', group: '定时任务' },
+  verify_below_credits: { title: '实时校验阈值', hint: '余额低于此值的账号在发请求前补查一次真实余额。设太高会给每个请求加一次往返。', group: '账号调度' },
+  verify_stale_sec: { title: '余额数据保鲜期', hint: '单位秒。这么久内查过的就不重复查。', group: '账号调度' },
+  auth_fail_limit: { title: '鉴权失败容忍次数', hint: '连续失败这么多次才判定账号失效。', group: '账号调度' },
+  expiring_soon_h: { title: '即将到期阈值', hint: '单位小时。套餐剩余时间少于此值的账号会被优先轮换掉。', group: '账号调度' },
+};
+
+const CFG_GROUPS = ['接码平台', '网络出口', '定时任务', '账号调度'];
+
+/* 来源徽章：让人一眼看出这个值是代码默认、环境变量给的、还是在面板上改过的。
+   开源项目里这点很重要 —— 「我明明在 .env 里写了怎么没生效」多半是被
+   runtime 覆盖了，不标出来根本查不出。 */
+const SRC_LABEL = { default: ['idle', '默认值'], env: ['acc', '环境变量'], runtime: ['ok', '面板设置'] };
+
+function cfgRow(spec, values) {
+  const key = spec.key;
+  const meta = CFG_META[key] || { title: key, hint: '' };
+  const src = values[key + '__source'] || 'default';
+  const [srcCls, srcTxt] = SRC_LABEL[src] || SRC_LABEL.default;
+  const v = values[key];
+
+  let control;
+  if (spec.type === 'exits') {
+    // 出口表有专门的增删 UI 在代理池页，这里只报数量并指路，不做第二套编辑器
+    const n = Array.isArray(v) ? v.length : 0;
+    control = `<div class="cfg-static">${n ? fmtInt(n) + ' 个出口' : '未配置'}
+      <span class="dim">· 在「代理池」页增删</span></div>`;
+  } else if (spec.secret) {
+    // 密钥永远不回显明文，只说「配没配」。留空 = 不修改，这样用户改别的项时
+    // 不会因为密码框是空的就把已存的 token 抹掉。
+    const set = v && v.set;
+    control = `<input class="inp" data-cfg="${escapeHtml(key)}" type="password"
+        autocomplete="off" placeholder="${set ? '已配置 ' + escapeHtml(v.hint || '') + '，留空则不改' : '尚未配置'}" />
+      ${set ? `<button class="btn ghost sm" data-cfgclear="${escapeHtml(key)}"
+        title="清空这个密钥"><i data-lucide="eraser"></i></button>` : ''}`;
+  } else if (spec.choices) {
+    control = `<select data-cfg="${escapeHtml(key)}">${spec.choices.map((c) =>
+      `<option value="${escapeHtml(c)}"${String(v) === String(c) ? ' selected' : ''}>${escapeHtml(c)}</option>`
+    ).join('')}</select>`;
+  } else if (spec.type === 'int') {
+    control = `<input class="inp" data-cfg="${escapeHtml(key)}" type="number"
+      value="${escapeHtml(String(v ?? ''))}"
+      ${spec.min != null ? `min="${spec.min}"` : ''} ${spec.max != null ? `max="${spec.max}"` : ''} />`;
+  } else {
+    control = `<input class="inp" data-cfg="${escapeHtml(key)}" type="text"
+      value="${escapeHtml(String(v ?? ''))}" />`;
+  }
+
+  return `<div class="cfg-row">
+    <div class="cfg-lab">
+      <b>${escapeHtml(meta.title)}</b>
+      <span class="badge nodot ${srcCls}">${srcTxt}</span>
+      ${spec.env ? `<code class="dim">${escapeHtml(spec.env)}</code>` : ''}
+      ${meta.hint ? `<p class="cfg-hint">${escapeHtml(meta.hint)}</p>` : ''}
+    </div>
+    <div class="cfg-ctl">${control}</div>
+  </div>`;
+}
+
+function renderConfig(c) {
+  if (!c.ok) {
+    return `<div class="card"><div class="card-h"><h3>运行时配置</h3></div>
+      <div class="err-msg" style="color:var(--bad)">${escapeHtml(c.err)}</div></div>`;
+  }
+  const specs = c.d.spec || [];
+  const values = c.d.settings || {};
+  const byGroup = new Map();
+  for (const s of specs) {
+    const g = (CFG_META[s.key] || {}).group || '其它';
+    if (!byGroup.has(g)) byGroup.set(g, []);
+    byGroup.get(g).push(s);
+  }
+  // 已知分组按既定顺序排，未登记的分组兜在后面（后端加了新 key 也不会消失）
+  const order = [...CFG_GROUPS.filter((g) => byGroup.has(g)),
+    ...[...byGroup.keys()].filter((g) => !CFG_GROUPS.includes(g))];
+  const changed = specs.filter((s) => (values[s.key + '__source'] || 'default') === 'runtime').length;
+
+  return `<div class="card">
+    <div class="card-h">
+      <div><h3>运行时配置</h3>
+        <p>改完即时生效，不用重启。优先级：面板设置 &gt; 环境变量 &gt; 代码默认值</p></div>
+      <div class="acts">
+        ${changed ? `<span class="badge ok">${fmtInt(changed)} 项已自定义</span>` : ''}
+        <button class="btn ghost sm" data-act="cfgReset"><i data-lucide="rotate-ccw"></i><span>全部恢复默认</span></button>
+        <button class="btn primary sm" data-act="cfgSave"><i data-lucide="save"></i><span>保存</span></button>
+      </div>
+    </div>
+    ${order.map((g) => `<div class="cfg-group">
+      <div class="cfg-gt">${escapeHtml(g)}</div>
+      ${byGroup.get(g).map((s) => cfgRow(s, values)).join('')}
+    </div>`).join('')}
+    <div class="note" id="cfgMsg" hidden><i data-lucide="info"></i><span></span></div>
+  </div>`;
+}
+
+/** 收集表单里被改动的项。密钥留空表示「不改」，必须排除，否则会把已存的 token 抹掉。 */
+function collectConfig(root) {
+  const out = {};
+  root.querySelectorAll('[data-cfg]').forEach((inp) => {
+    const key = inp.dataset.cfg;
+    const spec = (state.config?.d?.spec || []).find((s) => s.key === key);
+    if (!spec) return;
+    const raw = inp.value;
+    if (spec.secret) {
+      if (raw.trim()) out[key] = raw.trim();     // 只有真填了才提交
+      return;
+    }
+    const cur = state.config.d.settings[key];
+    if (spec.type === 'int') {
+      if (raw.trim() === '') return;
+      const n = Number(raw);
+      if (Number.isFinite(n) && n !== Number(cur)) out[key] = n;
+    } else if (raw !== String(cur ?? '')) {
+      out[key] = raw;
+    }
+  });
+  return out;
+}
+
 /* ---------------------------------------------------------------- 渲染 */
 
 let modelFilter = '';
@@ -233,6 +382,7 @@ function render(root) {
       ${renderAuth(state.auth)}
       ${renderCache(state.cache)}
     </div>
+    <div style="margin-top:14px">${renderConfig(state.config)}</div>
     <div style="margin-top:14px">${renderModels(state.models, modelFilter)}</div>
     <div style="margin-top:14px">${renderJobs(state.jobs)}</div>`;
   refreshIcons();
@@ -287,6 +437,45 @@ function bind(root) {
     b.addEventListener('click', async () => {
       const ok = await copyText(b.dataset.copy);
       toast(ok ? '已复制 ' + b.dataset.copy : '复制失败', ok ? 'ok' : 'err');
+    }));
+
+  root.querySelector('[data-act="cfgSave"]')?.addEventListener('click', async (e) => {
+    const btn = e.currentTarget;
+    const upd = collectConfig(root);
+    if (!Object.keys(upd).length) { toast('没有改动', 'ok'); return; }
+    btn.disabled = true;
+    try {
+      const r = await apiFetch('/api/settings', { method: 'POST', body: upd });
+      toast(`已保存 ${r.changed.length} 项，立即生效`, 'ok');
+      await boot(root);
+    } catch (err) {
+      toast('保存失败：' + err.message, 'err');
+      btn.disabled = false;
+    }
+  });
+
+  root.querySelector('[data-act="cfgReset"]')?.addEventListener('click', async () => {
+    const ok = await confirmDialog('恢复默认配置',
+      '会清掉所有在面板上改过的配置，回落到环境变量或代码默认值。'
+      + '接码 token 也会被清空，需要重新填。', { okText: '全部恢复' });
+    if (!ok) return;
+    try {
+      await apiFetch('/api/settings/reset', { method: 'POST', body: {} });
+      toast('已恢复默认', 'ok');
+      await boot(root);
+    } catch (e) { toast('恢复失败：' + e.message, 'err'); }
+  });
+
+  root.querySelectorAll('[data-cfgclear]').forEach((b) =>
+    b.addEventListener('click', async () => {
+      const key = b.dataset.cfgclear;
+      if (!(await confirmDialog('清空密钥', `确定清掉 ${key}？相关功能会立刻停用。`,
+        { okText: '清空' }))) return;
+      try {
+        await apiFetch('/api/settings/reset', { method: 'POST', body: { keys: [key] } });
+        toast('已清空', 'ok');
+        await boot(root);
+      } catch (e) { toast('清空失败：' + e.message, 'err'); }
     }));
 }
 

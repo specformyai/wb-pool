@@ -34,8 +34,14 @@ with TestClient(app) as c:
     r = c.get("/api/auth/state"); ck("auth/state 免登录可访问", r.status_code == 200, r.text)
     st = r.json(); ck("初始未登录", st["logged_in"] is False, st)
     ck("报告默认密码", st["default_password"] is True, st)
-    ck("/api/pool 未登录 401", c.get("/api/pool").status_code == 401)
-    ck("/api/keys 未登录 401", c.get("/api/keys").status_code == 401)
+    # 强制改密中间件跑在鉴权依赖之前：默认密码期受保护接口一律 403
+    # need_password_change，而不是 401。真正的「未登录 -> 401」在第 3 节
+    # 改密后的登出场景里验（那时才是纯鉴权路径）。
+    r_pool = c.get("/api/pool")
+    ck("默认密码期 /api/pool 被闸门拦成 403", r_pool.status_code == 403, r_pool.text)
+    ck("403 里带 need_password_change 标记",
+       r_pool.json().get("need_password_change") is True, r_pool.text)
+    ck("默认密码期 /api/keys 同样被拦", c.get("/api/keys").status_code == 403)
     h = c.get("/api/health").json(); ck("health 未登录不泄露池子", h.get("authed") is False and "stats" not in h, h)
     ck("首页 200", c.get("/").status_code == 200)
 
@@ -44,10 +50,34 @@ with TestClient(app) as c:
     r = c.post("/api/auth/login", json={"user":"admin","password":"admin"})
     ck("默认 admin/admin 登录成功", r.status_code == 200, r.text)
     ck("下发 HttpOnly cookie", "wb_session" in c.cookies, dict(c.cookies))
-    ck("登录后 /api/pool 200", c.get("/api/pool").status_code == 200)
+    # 登录成功也不解闸 —— 闸门看的是「默认密码改没改」，不是「登录没登录」。
+    # 这正是它的价值：光有 session 不足以放开接口，必须先把默认密码换掉。
+    ck("登录但未改密时 /api/pool 仍被拦", c.get("/api/pool").status_code == 403)
+    # /api/health 在闸门白名单里（监控探针不该因为默认密码没改就变红），
+    # 所以这里能正常拿到 stats。
     h = c.get("/api/health").json(); ck("登录后 health 带 stats", h.get("authed") and "stats" in h, h)
 
-    print("── 3. API Key 生成/校验 ──")
+    print("── 3. 改密码（同时解开强制改密闸门）──")
+    # 位置很关键：默认密码未改时中间件会锁住后面所有接口，
+    # 所以这一节必须在 API Key / 调用日志那些节之前跑。
+    # old=admin 在这个时点仍然有效，正是它要测的场景。
+    ck("旧密码错 -> 400", c.post("/api/auth/password", json={"old":"x","new":"newpass123"}).status_code == 400)
+    ck("新密码太短 -> 400", c.post("/api/auth/password", json={"old":"admin","new":"123"}).status_code == 400)
+    ck("改密成功", c.post("/api/auth/password", json={"old":"admin","new":"newpass123"}).status_code == 200)
+    c.cookies.clear()
+    ck("旧密码不能再登录", c.post("/api/auth/login", json={"user":"admin","password":"admin"}).status_code == 401)
+    r = c.post("/api/auth/login", json={"user":"admin","password":"newpass123"})
+    ck("新密码可登录", r.status_code == 200, r.text)
+    ck("不再报默认密码", r.json()["default_password"] is False, r.json())
+    ck("登出", c.post("/api/auth/logout").status_code == 200)
+    # 闸门解开后才能验纯鉴权语义：这时未登录就是 401，不再被 403 遮住。
+    ck("登出后 401", c.get("/api/pool").status_code == 401)
+    ck("登出后 /api/keys 也 401", c.get("/api/keys").status_code == 401)
+    ck("401 不再是闸门的 need_password_change",
+       "need_password_change" not in c.get("/api/pool").text)
+    c.post("/api/auth/login", json={"user":"admin","password":"newpass123"})
+
+    print("── 4. API Key 生成/校验 ──")
     ck("初始无 key", c.get("/api/keys").json()["keys"] == [], c.get("/api/keys").json())
     # 没有任何 key 时 /v1 应放行（避免把自己锁在外面）
     ck("无 key 时 /v1/models 放行", c.get("/v1/models").status_code == 200)
@@ -74,7 +104,7 @@ with TestClient(app) as c:
     ck("删除 key", c.delete(f"/api/keys/{kid2}").status_code == 200)
     ck("删除后 401", c.get("/v1/models", headers={"x-api-key": nk}).status_code == 401)
 
-    print("── 3b. 真实 chat 落账（假上游） ──")
+    print("── 4b. 真实 chat 落账（假上游） ──")
     from app import main as M
     from app import upstream as U
 
@@ -126,7 +156,9 @@ with TestClient(app) as c:
     ck("指定账号 11140 后标 dead", r.status_code >= 400 and seed_acc.status == "dead",
        (r.status_code, seed_acc.status))
 
-    js = (Path(__file__).resolve().parents[1] / "web" / "app.js").read_text(encoding="utf-8")
+    # 前端早已模块化拆分，聊天调试那段搬到了 web/chat.js —— 老的 web/app.js
+    # 不再存在（这条断言曾因此一直是 FileNotFoundError）。
+    js = (Path(__file__).resolve().parents[1] / "web" / "chat.js").read_text(encoding="utf-8")
     ck("WebUI 调试走 session 接口且无残留 KEY",
        "fetch('/api/chat/completions'" in js and "if (KEY)" not in js)
 
@@ -144,19 +176,6 @@ with TestClient(app) as c:
     ck("recent 带账号掩码", any(x.get("account") for x in rc), rc[:2])
     M.upstream.stream_chat = orig_stream
     c.post("/api/calls/reset")
-
-    print("── 4. 改密码 ──")
-    ck("旧密码错 -> 400", c.post("/api/auth/password", json={"old":"x","new":"newpass123"}).status_code == 400)
-    ck("新密码太短 -> 400", c.post("/api/auth/password", json={"old":"admin","new":"123"}).status_code == 400)
-    ck("改密成功", c.post("/api/auth/password", json={"old":"admin","new":"newpass123"}).status_code == 200)
-    c.cookies.clear()
-    ck("旧密码不能再登录", c.post("/api/auth/login", json={"user":"admin","password":"admin"}).status_code == 401)
-    r = c.post("/api/auth/login", json={"user":"admin","password":"newpass123"})
-    ck("新密码可登录", r.status_code == 200, r.text)
-    ck("不再报默认密码", r.json()["default_password"] is False, r.json())
-    ck("登出", c.post("/api/auth/logout").status_code == 200)
-    ck("登出后 401", c.get("/api/pool").status_code == 401)
-    c.post("/api/auth/login", json={"user":"admin","password":"newpass123"})
 
     print("── 5. 调用日志/可用性 ──")
     from app.main import calllog as CLOG

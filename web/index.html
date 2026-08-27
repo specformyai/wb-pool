@@ -17,14 +17,13 @@
 
 <link rel="preconnect" href="https://unpkg.com" />
 <link rel="stylesheet" href="/static/shared.css?v=4a8191e8" />
-<link rel="stylesheet" href="/static/app.css?v=42100693" />
+<link rel="stylesheet" href="/static/app.css?v=cf90bf82" />
 <link rel="stylesheet" href="/static/pool.css?v=4c474f2b" />
-<link rel="stylesheet" href="/static/pages.css?v=f0473655" />
+<link rel="stylesheet" href="/static/pages.css?v=1dde1b71" />
 <link rel="stylesheet" href="/static/chat.css?v=ec9ef2d8" />
 <link rel="stylesheet" href="/static/rates.css?v=ca3e6ec3" />
 <link rel="stylesheet" href="/static/history.css?v=ba0d8f92" />
 <!-- 自绘下拉组件：替代原生 select，避免系统绘制的白底展开层 -->
-<link rel="stylesheet" href="/static/login.css?v=4d1291bd" />
 <link rel="stylesheet" href="/static/health.css?v=9d6ac215" />
 <link rel="stylesheet" href="/static/dropdown.css?v=cf99af58" />
 <script src="https://unpkg.com/lucide@0.469.0/dist/umd/lucide.min.js"></script>
@@ -51,31 +50,46 @@
   "imports": {
     "@/shared.js":       "/static/shared.js?v=d14d6557",
     "@/router.js":       "/static/router.js?v=45447a20",
-    "@/chat.js":         "/static/chat.js?v=2b992240",
+    "@/chat.js":         "/static/chat.js?v=82b5958c",
     "@/dropdown.js":     "/static/dropdown.js?v=5e8936b2",
     "@/health.js":       "/static/health.js?v=794f1767",
     "@/history.js":      "/static/history.js?v=639f6676",
-    "@/login.js":        "/static/login.js?v=75cedf7d",
     "@/overview.js":     "/static/overview.js?v=e78804b8",
-    "@/pages.js":        "/static/pages.js?v=f0388df3",
-    "@/pool.js":         "/static/pool.js?v=fe4673e7",
+    "@/pages.js":        "/static/pages.js?v=40522705",
+    "@/pool.js":         "/static/pool.js?v=cfd87d2a",
     "@/rates.js":        "/static/rates.js?v=651f700e",
     "@/selectify.js":    "/static/selectify.js?v=43162b63",
-    "@/settings.js":     "/static/settings.js?v=eaf81552"
+    "@/settings.js":     "/static/settings.js?v=42feb2b4"
   }
 }
 </script>
 <script type="module">
   import { start } from '@/router.js';
   import { refreshIcons } from '@/shared.js';
-  import { requireLogin } from '@/login.js';
 
-  // 管理接口只认 wb_session cookie，未登录时每个 /api/* 都会 401，
-  // 所以先过登录门再渲染主界面。requireLogin 内部自己处理三种情况：
-  // 已登录直接放行、未登录渲染表单、后端不可达渲染可重试的错误态。
-  // 它只在确认登录后才 resolve，所以这里 await 完就能安全 start()。
+  // 登录是独立页面 /login，不再在这里弹遮罩 —— 地址栏要如实反映「你在登录」，
+  // 这样刷新、收藏、后退都符合预期，也不会出现两套登录 UI 同时存在。
+  //
+  // 后端访问 / 时未登录就已经 302 到 /login 了，所以正常情况走不到这里。
+  // 这段是给「页面开着不动、session 过期」那种情况兜底：不做检查的话
+  // 首屏每个 /api/* 都 401，用户只看到一堆报错卡片而不知道该去登录。
+  const gotoLogin = () => {
+    const next = encodeURIComponent(location.pathname + location.search + location.hash);
+    location.replace('/login?next=' + next);
+  };
+
   (async () => {
-    await requireLogin();
+    let st = null;
+    try {
+      const r = await fetch('/api/auth/state', { credentials: 'same-origin' });
+      st = r.ok ? await r.json() : null;
+    } catch {
+      st = null;   // 后端不可达：不跳转，让页面自己显示错误态，免得陷入跳转循环
+    }
+    if (st && st.logged_in !== true) { gotoLogin(); return; }
+    // 还在用默认密码：主界面所有 /api/* 都会被后端闸门 403，先去改密
+    if (st && st.must_change_password === true) { gotoLogin(); return; }
+
     refreshIcons();
     start();
   })();

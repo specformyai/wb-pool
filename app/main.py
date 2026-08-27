@@ -22,7 +22,8 @@ from typing import Any, AsyncIterator, Iterator
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
 from fastapi import Cookie, Depends, FastAPI, Header, HTTPException, Request, Response
-from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
+from fastapi.responses import (HTMLResponse, JSONResponse, RedirectResponse,
+                               StreamingResponse)
 from fastapi.staticfiles import StaticFiles
 
 from . import upstream
@@ -31,10 +32,12 @@ from . import uoomsg as uum
 from .accounting import Ledger
 from .apikeys import KeyStore
 from .calllog import CallLog
+from . import pool as pool_mod
 from .pool import Account, AccountPool, classify_error
-from .proxies import DEFAULT_EXITS, ProxyManager, is_proxy_error
+from .proxies import EXAMPLE_EXITS, ProxyManager, is_proxy_error
 from .register import Registrar
 from .auto_register import AutoRegistrar
+from .settings import Settings
 from .history import (HistoryFetcher, HistoryStore, build_sessions,
                       summarize)
 from .upstream_sync import (STATIC_MODELS, static_models, merge_unlisted,
@@ -58,7 +61,12 @@ def _next_upstream_chunk(gen: Iterator[Any]) -> Any:
 # 配置
 # --------------------------------------------------------------------------- #
 BASE_DIR = Path(__file__).resolve().parent.parent
-DATA_DIR = Path(os.environ.get("WB_DATA_DIR", BASE_DIR / "data"))
+_DATA_DIR_ENV = (os.environ.get("WB_DATA_DIR") or "").strip()
+# 相对路径按**项目根**解析，不按进程 cwd。否则 systemd 的 WorkingDirectory 或
+# 容器 workdir 一变，就会在别的地方悄悄建出一个空 data/，账号池看着像全丢了。
+DATA_DIR = Path(_DATA_DIR_ENV) if _DATA_DIR_ENV else BASE_DIR / "data"
+if not DATA_DIR.is_absolute():
+    DATA_DIR = (BASE_DIR / DATA_DIR).resolve()
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 
 ACCOUNTS_FILE = Path(os.environ.get("WB_ACCOUNTS_FILE", DATA_DIR / "accounts.jsonl"))
@@ -68,32 +76,112 @@ APIKEYS_FILE = DATA_DIR / "apikeys.json"
 WEBAUTH_FILE = DATA_DIR / "webauth.json"
 CALLS_FILE = DATA_DIR / "calls.jsonl"
 
+SETTINGS_FILE = DATA_DIR / "settings.json"
+
+# 这两把 key 仍然只从环境变量来：它们是「谁能调这个服务」的根凭据，
+# 让面板能改自己的准入凭据等于给了提权路径。其余配置都走 settings 层。
 API_KEY = os.environ.get("WB_API_KEY", "")            # 兼容老客户端的内建 key
 ADMIN_KEY = os.environ.get("WB_ADMIN_KEY", API_KEY)   # 管理接口后备密钥（供脚本用）
-PROXY_MODE = os.environ.get("WB_PROXY_MODE", "off")   # off | fixed | rotate
-PROXY_HOST = os.environ.get("WB_PROXY_HOST", "127.0.0.1")
-PROXY_FIXED = os.environ.get("WB_PROXY_URL", "")
-CHECKIN_CRON = os.environ.get("WB_CHECKIN_CRON", "5 1 * * *")
-# 余额刷新间隔。30 分钟太长：两次刷新之间余额可能已被打光，
-# 面板显示陈旧正数、调度器照发请求必吃 14018（实测 7460 本地 57.50 / 上游 0）。
-BALANCE_INTERVAL = int(os.environ.get("WB_BALANCE_INTERVAL_MIN", "10"))
-UOOMSG_TOKEN = os.environ.get("WB_UOOMSG_TOKEN", "")
 COOKIE_SECURE = os.environ.get("WB_COOKIE_SECURE", "auto")   # auto | on | off
+
+# 运行时配置层：优先级 settings.json（面板改的） > 环境变量 > 代码默认值。
+# 出口表、接码 token、签到 cron 这类东西必须能在面板上改完立刻生效，
+# 否则别人 clone 下来就得编辑文件重启 —— 那不是能给别人用的东西。
+settings = Settings(SETTINGS_FILE)
+
+# 时区：十几处 time.strftime 按本地时间算「今天」，签到判重和「今日到账」列都依赖它。
+# 部署到非东八区的机器上如果不改，会整体错一天。
+TZ_NAME = settings.get("timezone")
+os.environ.setdefault("TZ", TZ_NAME)
+try:
+    time.tzset()          # 让 time.strftime 真正切到该时区（Windows 上没有这个函数）
+except AttributeError:
+    pass
 
 pool = AccountPool(ACCOUNTS_FILE)
 ledger = Ledger(DATA_DIR / "ledger.json")
 keystore = KeyStore(APIKEYS_FILE, env_key=API_KEY)
 webauth = WebAuth(WEBAUTH_FILE)
 calllog = CallLog(CALLS_FILE)
-pm = ProxyManager(mode=PROXY_MODE, host=PROXY_HOST, fixed_url=PROXY_FIXED,
-                  exits=DEFAULT_EXITS, state_file=PROXY_STATE)
+pm = ProxyManager(mode=settings.get("proxy_mode"),
+                  host=settings.get("proxy_host"),
+                  fixed_url=settings.get("proxy_url"),
+                  exits=settings.get("proxy_exits"),
+                  state_file=PROXY_STATE)
 registrar = Registrar(pool, pm)
-auto_registrar = AutoRegistrar(registrar, UOOMSG_TOKEN)
+auto_registrar = AutoRegistrar(registrar, settings.get("uoomsg_token"))
 history_store = HistoryStore(DATA_DIR / "history")
 history_fetcher = HistoryFetcher(pool, history_store, proxy_mgr=pm)
 # 出口故障时账号池要能自己换线重试
 pool.proxy_mgr = pm
-scheduler = BackgroundScheduler(timezone="Asia/Shanghai")
+scheduler = BackgroundScheduler(timezone=TZ_NAME)
+
+# --------------------------------------------------------------------------- #
+# 配置热生效
+#
+# 两个方向都要通，而且必须互相打断，否则死循环：
+#   面板改出口 → pm.set_exits() → pm 的 on_change → 写回 settings
+#   面板改配置 → settings 的 on_change → 应用到 pm / registrar / 全局阈值
+# _APPLYING 就是那道闸门。
+# --------------------------------------------------------------------------- #
+_APPLYING = False
+
+
+def _persist_exits(exits: dict[int, str]) -> None:
+    """ProxyManager 出口表变了 → 落盘到 settings.json。"""
+    global _APPLYING
+    if _APPLYING:
+        return
+    _APPLYING = True
+    try:
+        settings.set_many({"proxy_exits": dict(exits)})
+    except Exception as exc:  # noqa: BLE001
+        print(f"[settings] 出口表持久化失败: {exc}")
+    finally:
+        _APPLYING = False
+
+
+pm.on_change = _persist_exits
+
+
+def _apply_settings(changed: dict[str, Any]) -> None:
+    """settings 变更 → 立刻作用到已经建好的对象上，不需要重启进程。"""
+    global _APPLYING
+    if _APPLYING:
+        return
+    _APPLYING = True
+    try:
+        if "proxy_mode" in changed:
+            pm.mode = changed["proxy_mode"]
+        if "proxy_host" in changed:
+            pm.host = changed["proxy_host"]
+        if "proxy_url" in changed:
+            pm.fixed_url = changed["proxy_url"]
+        if "proxy_exits" in changed:
+            pm.set_exits(changed["proxy_exits"])
+        if "uoomsg_token" in changed:
+            # AutoRegistrar 把 token 存成普通属性，直接换即可
+            auto_registrar.token = changed["uoomsg_token"]
+        # 下面几个是别的模块的模块级全局，改它们的属性而不是重建对象
+        if "verify_below_credits" in changed:
+            pool_mod.VERIFY_BELOW_CREDITS = float(changed["verify_below_credits"])
+        if "verify_stale_sec" in changed:
+            pool_mod.VERIFY_STALE_SEC = float(changed["verify_stale_sec"])
+        if "auth_fail_limit" in changed:
+            pool_mod.AUTH_FAIL_LIMIT = int(changed["auth_fail_limit"])
+        if "expiring_soon_h" in changed:
+            upstream.EXPIRING_SOON_H = float(changed["expiring_soon_h"])
+        # cron / 间隔变了要重排作业，否则改完得等重启才生效
+        if ("checkin_cron" in changed or "balance_interval_min" in changed) \
+                and scheduler.running:
+            _reschedule_jobs()
+    except Exception as exc:  # noqa: BLE001
+        print(f"[settings] 应用配置失败: {exc}")
+    finally:
+        _APPLYING = False
+
+
+settings.on_change(_apply_settings)
 
 app = FastAPI(title="wb-pool", version="1.1.0", docs_url="/api/docs", redoc_url=None)
 
@@ -897,10 +985,14 @@ def auth_state(request: Request,
                wb_session: str | None = Cookie(None, alias=COOKIE_NAME)) -> dict[str, Any]:
     """未登录也能调：前端据此决定显示登录页还是主界面。"""
     s = webauth.session(wb_session or "")
+    default_pw = webauth.uses_default_password()
     return {
         "logged_in": bool(s),
         "user": (s or {}).get("user"),
-        "default_password": webauth.uses_default_password(),
+        "default_password": default_pw,
+        # 前端据此决定是否强制跳改密表单。别让前端自己拼这个判断 ——
+        # 「还在用默认密码」这件事只有后端说得准。
+        "must_change_password": default_pw,
         "users": len(webauth.users()),
     }
 
@@ -934,12 +1026,18 @@ async def auth_password(request: Request, response: Response,
     target = user if user != "admin-key" else str(body.get("user") or "").strip()
     if not target:
         raise HTTPException(400, "缺少用户名")
-    ok, msg = webauth.change_password(target, str(body.get("old") or ""),
-                                      str(body.get("new") or ""))
+    # 前端 settings.js 发的是 old_password / new_password，后端原来只读 old / new
+    # —— 键名对不上，改密码功能实际一直是坏的（永远报「原密码不对」）。
+    # 两套键都收，旧脚本不破。
+    old_pw = str(body.get("old") or body.get("old_password") or "")
+    new_pw = str(body.get("new") or body.get("new_password") or "")
+    ok, msg = webauth.change_password(target, old_pw, new_pw)
     if not ok:
         raise HTTPException(400, msg)
     response.delete_cookie(COOKIE_NAME, path="/")
-    return {"ok": True, "message": "密码已改，请重新登录"}
+    # change_password() 会踢掉该用户所有 session，所以改完必须重新登录。
+    # 给出 redirect 让前端不用自己猜去哪。
+    return {"ok": True, "message": "密码已改，请重新登录", "redirect": "/login"}
 
 
 # --------------------------------------------------------------------------- #
@@ -1177,8 +1275,11 @@ async def api_import(request: Request) -> dict[str, Any]:
 @app.post("/api/register/start", dependencies=[Depends(require_admin)])
 async def api_reg_start(request: Request) -> dict[str, Any]:
     b = await request.json()
+    # invite_code 可选：为空就不绑邀请码，注册照常走完。
+    # 必须往下传 —— 绑定在 finish 阶段做，会话得先记住它（原来这里直接丢弃了）。
     res = registrar.start(b.get("phone", ""),
-                          proxy_override=b.get("proxy") if "proxy" in b else None)
+                          proxy_override=b.get("proxy") if "proxy" in b else None,
+                          invite_code=b.get("invite_code", ""))
     if not res.get("ok"):
         return JSONResponse(res, status_code=400)
     return res
@@ -1204,13 +1305,29 @@ def api_reg_sessions(all: bool = False) -> dict[str, Any]:
 # ---- 自动注册（uoomsg） ----
 @app.post("/api/auto_register/start", dependencies=[Depends(require_admin)])
 async def api_auto_reg_start(request: Request) -> dict[str, Any]:
-    if not UOOMSG_TOKEN:
-        return JSONResponse({"ok": False, "error": "WB_UOOMSG_TOKEN 未配置"}, status_code=400)
+    if not settings.get("uoomsg_token"):
+        return JSONResponse(
+            {"ok": False,
+             "error": "接码平台 token 未配置，去「设置 → 接码平台」填一个"},
+            status_code=400)
     b = await request.json()
+    # count 必须是 >=1 的整数。AutoRegistrar.start 内部 max(1, ...) 会把 0 / 负数
+    # 静默抬成 1，而那是一次真取号 + 真发短信 + 真扣接码余额的操作，
+    # 手滑传 0 就白烧一个号。在边界拒掉，不靠下游兜底。
+    raw_count = b.get("count", 1)
+    if isinstance(raw_count, bool) or not isinstance(raw_count, int):
+        try:
+            raw_count = int(str(raw_count).strip())
+        except (TypeError, ValueError):
+            return JSONResponse({"ok": False, "error": "count 必须是整数"},
+                                status_code=400)
+    if raw_count < 1 or raw_count > 20:
+        return JSONResponse({"ok": False, "error": "count 必须在 1-20 之间"},
+                            status_code=400)
     return auto_registrar.start(
         invite_code=b.get("invite_code", ""),
         label=b.get("label", ""),
-        count=b.get("count", 1),
+        count=raw_count,
     )
 
 
@@ -1239,9 +1356,11 @@ def api_auto_reg_clear() -> dict[str, Any]:
 
 @app.get("/api/uoomsg/balance", dependencies=[Depends(require_admin)])
 def api_uoomsg_balance() -> dict[str, Any]:
-    if not UOOMSG_TOKEN:
-        return {"ok": False, "error": "WB_UOOMSG_TOKEN 未配置"}
-    bal = uum.balance(UOOMSG_TOKEN)
+    token = settings.get("uoomsg_token")
+    if not token:
+        return {"ok": False,
+                "error": "接码平台 token 未配置，去「设置 → 接码平台」填一个"}
+    bal = uum.balance(token)
     return {"ok": True, "balance": bal}
 
 
@@ -1335,10 +1454,102 @@ async def api_proxy_mode(request: Request) -> dict[str, Any]:
     mode = b.get("mode", "off")
     if mode not in ("off", "fixed", "rotate"):
         raise HTTPException(400, "mode 必须是 off|fixed|rotate")
-    pm.mode = mode
+    # 经 settings 写：进程重启后还是这个模式。直接改 pm.mode 会在重启后丢掉。
+    upd: dict[str, Any] = {"proxy_mode": mode}
     if "url" in b:
-        pm.fixed_url = b["url"] or ""
-    return {"ok": True, "mode": pm.mode, "fixed_url": pm.fixed_url}
+        upd["proxy_url"] = b["url"] or ""
+    if "host" in b:
+        upd["proxy_host"] = b["host"] or "127.0.0.1"
+    try:
+        settings.set_many(upd)
+    except (ValueError, KeyError) as exc:
+        raise HTTPException(400, str(exc)) from exc
+    return {"ok": True, "mode": pm.mode, "fixed_url": pm.fixed_url, "host": pm.host}
+
+
+@app.post("/api/proxy/exits", dependencies=[Depends(require_admin)])
+async def api_proxy_exit_add(request: Request) -> dict[str, Any]:
+    """加一个出口，或整表替换。
+
+    body 二选一：
+      {"port": 3128, "label": "squid"}          单个添加/改标签
+      {"exits": [{"port":3128,"label":"a"}, …]} 整表替换
+    """
+    b = await request.json()
+    try:
+        if "exits" in b:
+            table: dict[int, str] = {}
+            for item in b.get("exits") or []:
+                if isinstance(item, dict):
+                    table[int(item.get("port"))] = str(item.get("label") or "")
+                else:                       # 也接受裸端口号数组
+                    table[int(item)] = ""
+            return pm.set_exits(table)
+        return pm.add_exit(int(b.get("port")), str(b.get("label") or ""))
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(400, f"出口参数非法: {exc}") from exc
+
+
+@app.delete("/api/proxy/exits/{port}", dependencies=[Depends(require_admin)])
+def api_proxy_exit_del(port: int) -> dict[str, Any]:
+    try:
+        r = pm.remove_exit(port)
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(400, f"端口非法: {exc}") from exc
+    if not r.get("ok"):
+        raise HTTPException(404, r.get("error", "出口不存在"))
+    return r
+
+
+@app.post("/api/proxy/discover", dependencies=[Depends(require_admin)])
+async def api_proxy_discover(request: Request) -> dict[str, Any]:
+    """扫本机端口找可用出口。body 可选 {"ranges": [[60001,60020]], "add": false}"""
+    b = await request.json() if await request.body() else {}
+    ranges = None
+    if b.get("ranges"):
+        try:
+            ranges = tuple((int(x[0]), int(x[1])) for x in b["ranges"])
+        except (TypeError, ValueError, IndexError, KeyError) as exc:
+            raise HTTPException(400, f"ranges 格式应为 [[start,end], …]: {exc}") from exc
+    r = pm.autodiscover(ranges=ranges, host=b.get("host") or None,
+                        add=bool(b.get("add")))
+    if not r.get("ok"):
+        raise HTTPException(400, r.get("error", "探测失败"))
+    return r
+
+
+# ---- 运行时配置 ----
+@app.get("/api/settings", dependencies=[Depends(require_admin)])
+def api_settings_get() -> dict[str, Any]:
+    """当前配置 + 每项的来源（default/env/runtime）。密钥只回 set/hint，不回明文。"""
+    return {"ok": True, "settings": settings.public_view(),
+            "spec": settings.spec_view()}
+
+
+@app.post("/api/settings", dependencies=[Depends(require_admin)])
+async def api_settings_set(request: Request) -> dict[str, Any]:
+    b = await request.json()
+    updates = b.get("settings") if isinstance(b.get("settings"), dict) else b
+    if not isinstance(updates, dict) or not updates:
+        raise HTTPException(400, "body 需要形如 {\"proxy_mode\": \"off\"} 的键值对")
+    try:
+        changed = settings.set_many(updates)
+    except (ValueError, KeyError) as exc:
+        raise HTTPException(400, str(exc)) from exc
+    return {"ok": True, "changed": sorted(changed),
+            "settings": settings.public_view()}
+
+
+@app.post("/api/settings/reset", dependencies=[Depends(require_admin)])
+async def api_settings_reset(request: Request) -> dict[str, Any]:
+    b = await request.json() if await request.body() else {}
+    keys = b.get("keys") if isinstance(b.get("keys"), list) else None
+    try:
+        settings.reset(keys)
+    except (ValueError, KeyError) as exc:
+        raise HTTPException(400, str(exc)) from exc
+    return {"ok": True, "reset": keys or "all",
+            "settings": settings.public_view()}
 
 
 # ---- 邀请 ----
@@ -1427,6 +1638,42 @@ def _job_sync_models() -> None:
         print(f"[cron] 模型清单刷新失败: {exc}")
 
 
+def _reschedule_jobs() -> None:
+    """（重新）注册全部定时作业。
+
+    独立成函数是为了让面板改完 checkin_cron / balance_interval_min 之后
+    能立刻重排，而不是「改了要等重启」。
+
+    ⚠️ replace_existing=True 只对**已在运行**的调度器生效。scheduler.start()
+    之前 add_job 走的是 pending 队列，那条路径不查重 —— 未 start 时调两次会
+    得到六个作业（实测）。所以这里先显式清一遍，让函数在任何状态下都幂等，
+    调用方不必知道 APScheduler 的这个内部差异。
+    """
+    for jid in ("sync_models", "checkin", "balance"):
+        try:
+            scheduler.remove_job(jid)
+        except Exception:  # noqa: BLE001 —— 不存在就算了，这里只求幂等
+            pass
+    scheduler.add_job(_job_sync_models, "interval", hours=6,
+                      id="sync_models", name="模型清单刷新", replace_existing=True)
+    cron = str(settings.get("checkin_cron") or "").split()
+    if len(cron) == 5:
+        mi, h, d, mo, dow = cron
+        try:
+            scheduler.add_job(
+                _job_checkin,
+                CronTrigger(minute=mi, hour=h, day=d, month=mo,
+                            day_of_week=dow, timezone=TZ_NAME),
+                id="checkin", name="每日签到", replace_existing=True)
+        except Exception as exc:  # noqa: BLE001
+            print(f"[cron] 签到 cron 非法({cron}): {exc}")
+    else:
+        print(f"[cron] 签到 cron 字段数不是 5，已跳过: {cron!r}")
+    interval = max(1, int(settings.get("balance_interval_min") or 10))
+    scheduler.add_job(_job_balance, "interval", minutes=interval,
+                      id="balance", name="余额刷新", replace_existing=True)
+
+
 @app.on_event("startup")
 def _startup() -> None:
     # 模型清单：缓存过期则拉一次官方 console 接口（失败自动落静态兜底）
@@ -1439,20 +1686,7 @@ def _startup() -> None:
         print(f"[startup] 模型缓存有效，{c.get('available_count')} 个模型，"
               f"synced_at={c.get('synced_at')}")
 
-    # 每 6h 自动刷新一次模型清单
-    scheduler.add_job(_job_sync_models, "interval", hours=6,
-                      id="sync_models", name="模型清单刷新", replace_existing=True)
-    
-    # 添加定时任务
-    try:
-        mi, h, d, mo, dow = CHECKIN_CRON.split()
-        scheduler.add_job(_job_checkin, CronTrigger(minute=mi, hour=h, day=d, month=mo,
-                                                    day_of_week=dow, timezone="Asia/Shanghai"),
-                          id="checkin", name="每日签到", replace_existing=True)
-    except Exception:  # noqa: BLE001
-        pass
-    scheduler.add_job(_job_balance, "interval", minutes=BALANCE_INTERVAL,
-                      id="balance", name="余额刷新", replace_existing=True)
+    _reschedule_jobs()
     scheduler.start()
 
 
@@ -1619,19 +1853,78 @@ if STATIC_DIR.exists():
     app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
 
-@app.get("/", response_class=HTMLResponse)
-def index() -> HTMLResponse:
-    """吐出 SPA 入口。
+# --------------------------------------------------------------------------- #
+# 强制改默认密码
+#
+# 首次部署是 admin/admin。不改密就能对外服务等于裸奔，所以在改密之前
+# 只放行「登录 + 改密 + 静态资源 + 存活探针」，其余一律 403。
+#
+# ⚠️ 白名单里必须永远包含登录和改密接口，否则用户忘了改密又清掉 cookie
+# 就会把自己彻底锁在外面（只能去删 data/webauth.json）。当前设计下任何
+# 时候都能走「admin/admin 登录 → 改密 → 恢复」这条路。
+# --------------------------------------------------------------------------- #
+_PW_GATE_EXACT = frozenset({
+    "/", "/login", "/favicon.ico", "/api/health",
+    "/api/auth/state", "/api/auth/login", "/api/auth/logout",
+    "/api/auth/password",
+})
+_PW_GATE_PREFIX = ("/static/",)
 
-    前端资源的 cache-busting 由构建脚本负责：bump_version.py 按文件内容
-    哈希把 ?v=<sha1> 写进 index.html 的 importmap 和 <link>。后端不再
-    额外插 mtime —— 那会和已有的 ?v= 撞成两个问号把 URL 弄坏，而且 mtime
-    在 rsync 后会无谓变化，内容哈希才是真的"内容变了才失效"。
 
-    index.html 自己必须 no-store，否则用户拿到旧 HTML 就永远看不到新哈希。
+def _gate_allows(path: str) -> bool:
+    return path in _PW_GATE_EXACT or path.startswith(_PW_GATE_PREFIX)
+
+
+@app.middleware("http")
+async def force_password_change(request: Request, call_next):  # type: ignore[no-untyped-def]
+    """默认密码未改时锁住除白名单以外的一切。"""
+    if not webauth.uses_default_password() or _gate_allows(request.url.path):
+        return await call_next(request)
+
+    # 带对的 WB_ADMIN_KEY 就放行：那是环境变量里的根凭据，和「网页默认密码
+    # 没改」是两件独立的事，不该顺带把脚本运维也锁死。
+    if ADMIN_KEY:
+        key = _extract_key(request.headers.get("authorization"),
+                           request.headers.get("x-api-key"))
+        if key == ADMIN_KEY:
+            return await call_next(request)
+
+    return JSONResponse(
+        {"ok": False, "error": "首次使用必须修改默认密码", "need_password_change": True},
+        status_code=403)
+
+
+def _spa_html(name: str) -> HTMLResponse:
+    """吐出静态 HTML 入口。
+
+    前端资源的 cache-busting 由构建脚本负责：scripts/bump_static_version.py
+    按文件内容哈希把 ?v=<sha1> 写进 importmap 和 <link>。后端不再额外插
+    mtime —— 那会和已有的 ?v= 撞成两个问号把 URL 弄坏，而且 mtime 在 rsync
+    后会无谓变化，内容哈希才是真的"内容变了才失效"。
+
+    HTML 自己必须 no-store，否则用户拿到旧 HTML 就永远看不到新哈希。
     """
-    f = STATIC_DIR / "index.html"
+    hdr = {"Cache-Control": "no-store"}
+    f = STATIC_DIR / name
     if f.exists():
-        return HTMLResponse(f.read_text(encoding="utf-8"),
-                            headers={"Cache-Control": "no-store"})
-    return HTMLResponse("<h1>wb-pool</h1><p>WebUI 未安装</p>")
+        return HTMLResponse(f.read_text(encoding="utf-8"), headers=hdr)
+    # 兜底分支也要 no-store：没有它，浏览器可能把「WebUI 未安装」这个
+    # 占位页缓存下来，等前端装好了用户还在看旧占位页。
+    return HTMLResponse(f"<h1>wb-pool</h1><p>WebUI 未安装（缺 web/{name}）</p>",
+                        status_code=503, headers=hdr)
+
+
+@app.get("/login", response_class=HTMLResponse)
+def login_page(wb_session: str | None = Cookie(None, alias=COOKIE_NAME)):
+    """独立登录页。已登录且密码不是默认值时直接送回主界面。"""
+    if webauth.session(wb_session or "") and not webauth.uses_default_password():
+        return RedirectResponse("/", status_code=302)
+    return _spa_html("login.html")
+
+
+@app.get("/", response_class=HTMLResponse)
+def index(wb_session: str | None = Cookie(None, alias=COOKIE_NAME)):
+    """SPA 主入口。未登录直接 302 到 /login，让地址栏如实反映状态。"""
+    if not webauth.session(wb_session or ""):
+        return RedirectResponse("/login", status_code=302)
+    return _spa_html("index.html")

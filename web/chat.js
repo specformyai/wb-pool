@@ -44,7 +44,8 @@ function mdTable(rows) {
   return h + '</tbody></table></div>';
 }
 
-function renderMarkdown(src) {
+/** 渲染安全 Markdown。输出会进 innerHTML，所以先整体转义再解析 —— 见 tests/test_chat_render.mjs。 */
+export function renderMarkdown(src) {
   const blocks = [];
   let s = String(src == null ? '' : src);
   // 先抽离围栏代码块（未转义的原文），占位符后续替换
@@ -105,6 +106,23 @@ function renderMarkdown(src) {
   }
   flushPara();
   return out.join('');
+}
+
+/* ================= 多模态消息体 ================= */
+
+/**
+ * 拼 OpenAI 兼容的消息 content。
+ *
+ * 没有图片时直接回字符串（上游对纯文本更宽容，也省一层包装）；
+ * 有图片才回 parts 数组。text 为空时不塞空的 text part —— 上游会因为
+ * 空字符串 part 报参数错误。
+ */
+export function buildMessageContent(text, images) {
+  if (!images || !images.length) return text;
+  const parts = [];
+  if (text) parts.push({ type: 'text', text });
+  for (const im of images) parts.push({ type: 'image_url', image_url: { url: im.dataUrl } });
+  return parts;
 }
 
 /* ================= 页面挂载 ================= */
@@ -591,14 +609,7 @@ export function mountChat(root) {
     const text = ta.value.trim();
     if (!text && !state.images.length) return;
     if (!cfg.model) { toast('请先在右侧选择模型', 'bad'); return; }
-    let content;
-    if (state.images.length) {
-      content = [];
-      if (text) content.push({ type: 'text', text });
-      for (const im of state.images) content.push({ type: 'image_url', image_url: { url: im.dataUrl } });
-    } else {
-      content = text;
-    }
+    const content = buildMessageContent(text, state.images);
     addUserMessage(content);
     ta.value = ''; autoGrow();
     state.images = []; renderThumbs();

@@ -233,6 +233,7 @@
 .reg-sess-info{display:flex;align-items:center;gap:10px;flex:1;min-width:200px;flex-wrap:wrap}
 .reg-sess-phone{font-size:14px}
 .reg-sess-time{font-size:12px;color:var(--fg-3)}
+.reg-sess-inv{font-size:12px;color:var(--fg-3);padding:2px 8px;border:1px solid var(--line);border-radius:999px}
 .reg-sess-err{flex-basis:100%;font-size:12px;color:var(--bad)}
 .reg-sess-ops{display:flex;align-items:center;gap:8px}
 .reg-sess-ops .field{margin:0;width:130px}
@@ -296,3 +297,40 @@
 @media (max-width:768px){
   .page-invite .invite-grid{grid-template-columns:1fr}
 }
+
+/* ---------------------------------------------------------------------------
+ * 出口表增删 / 自动探测的弹窗控件
+ *
+ * 这几个类原来全站都没有定义。CSS 里引用不存在的类不会报错，
+ * 只是那条规则整个作废 —— 元素在、文字在，但没有任何视觉表现
+ * （错误提示看着像普通正文、复选框和文字不对齐、删除按钮是个裸叉）。
+ * 补在这里而不是 shared.css：这几个是弹窗内的局部控件，不是全站基础件。
+ * ------------------------------------------------------------------------- */
+
+/* shared.css 只给了 .field label，而这些弹窗用的是 .field > span 做标题 */
+.field > span{font-size:12.5px;color:var(--fg-2);font-weight:550}
+
+/* 弹窗内的错误条：和 .login-error 同一套视觉语言，保持全站一致 */
+.modal-err{display:flex;align-items:flex-start;gap:8px;margin-top:12px;
+  padding:9px 11px;border-radius:10px;font-size:12.5px;line-height:1.55;
+  color:var(--bad);background:rgba(239,68,68,.1);
+  border:1px solid rgba(239,68,68,.32)}
+.modal-err[hidden]{display:none}
+
+/* 复选框行：默认 checkbox 和文字基线对不齐，要显式对齐 */
+.chk{display:flex;align-items:center;gap:9px;margin-top:14px;
+  font-size:13px;color:var(--fg-2);cursor:pointer;user-select:none}
+.chk input[type="checkbox"]{width:15px;height:15px;flex:none;margin:0;
+  accent-color:var(--acc);cursor:pointer}
+
+/* 出口卡片上的删除按钮：平时低调，悬停才转红，避免一屏红叉 */
+.pdel{display:inline-flex;align-items:center;justify-content:center;
+  width:20px;height:20px;flex:none;padding:0;border:0;border-radius:6px;
+  background:transparent;color:var(--fg-3);cursor:pointer;
+  opacity:0;transition:opacity .15s var(--ease),color .15s var(--ease),
+    background-color .15s var(--ease)}
+.pdel i,.pdel svg{width:13px;height:13px}
+.pcard:hover .pdel,.pdel:focus-visible{opacity:1}
+.pdel:hover{color:var(--bad);background:rgba(239,68,68,.12)}
+/* 触屏没有 hover，删除按钮必须常驻可见 */
+@media (hover:none){.pdel{opacity:.7}}

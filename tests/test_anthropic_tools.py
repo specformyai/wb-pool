@@ -18,7 +18,7 @@ os.environ.update({
     "WB_DATA_DIR": TD,
     "WB_ACCOUNTS_FILE": str(Path(TD) / "accounts.jsonl"),
     "WB_API_KEY": "",
-    "WB_ADMIN_KEY": "",
+    "WB_ADMIN_KEY": "", "WB_ADMIN_PASS": "test-not-default",
     "WB_PROXY_MODE": "off",
     "WB_CHECKIN_CRON": "",
     "WB_BALANCE_INTERVAL_MIN": "9999",

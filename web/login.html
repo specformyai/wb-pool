@@ -1,0 +1,41 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<title>登录 · wb-pool 账号池网关</title>
+<meta name="description" content="wb-pool 账号池网关管理后台登录" />
+<meta name="robots" content="noindex" />
+<meta name="color-scheme" content="dark" />
+<link rel="icon" href="/static/favicon.ico" sizes="any" />
+<link rel="icon" type="image/png" sizes="192x192" href="/static/icon-192.png" />
+<link rel="icon" type="image/png" sizes="512x512" href="/static/icon-512.png" />
+<link rel="apple-touch-icon" sizes="180x180" href="/static/apple-touch-icon.png" />
+<meta name="theme-color" content="#070b12" />
+
+<!-- 登录页只需要变量层 + 表单样式，不拉主界面那一堆页面 CSS。
+     少加载七八个文件，首屏也更快。 -->
+<link rel="stylesheet" href="/static/shared.css?v=4a8191e8" />
+<link rel="stylesheet" href="/static/login.css?v=4d1291bd" />
+<script src="https://unpkg.com/lucide@0.469.0/dist/umd/lucide.min.js"></script>
+</head>
+<body class="login-mode">
+
+<div class="login-overlay" id="loginRoot"></div>
+<div class="toasts" id="toasts"></div>
+
+<script type="importmap">
+{
+  "imports": {
+    "@/shared.js":   "/static/shared.js?v=d14d6557",
+    "@/loginpage.js": "/static/loginpage.js?v=a3fb048e"
+  }
+}
+</script>
+<script type="module">
+  import { mountLoginPage } from '@/loginpage.js';
+  mountLoginPage(document.getElementById('loginRoot'));
+</script>
+
+</body>
+</html>

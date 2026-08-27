@@ -7,11 +7,23 @@ import unittest
 from typing import Any, cast
 from unittest.mock import patch
 
+import os
+import sys
+
+# 让 `python tests/xxx.py` 裸跑就能 import app.*，不依赖 PYTHONPATH。
+# 与 tests/ 下其他测试的既有写法保持一致。
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 from app import auto_register as ar
 
 
 class FakeRegistrar:
-    def start(self, phone: str) -> dict:
+    # 签名必须跟真 Registrar.start 对齐：_run() 调的是
+    # start(phone, origin="auto")（会话来源标记，用于把自动任务的会话
+    # 隔离出手动注册页）。少一个 origin 参数会抛 TypeError，被 _run 的
+    # except 吞掉 → 任务在「发码」阶段就失败，get_sms 压根不会被调用，
+    # 于是等码相关的断言全部落空。
+    def start(self, phone: str, origin: str = "manual") -> dict:
         return {"ok": True, "session_id": "session", "proxy": "direct"}
 
     def finish(self, session_id: str, code: str, label: str = "", invite_code: str = "") -> dict:

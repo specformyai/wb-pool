@@ -565,6 +565,8 @@ export function mountProxy(root) {
         <button data-act="mode" data-m="rotate">轮换</button>
       </div>
       <span style="flex:1"></span>
+      <button class="btn" data-act="discover" id="pDiscBtn"><i data-lucide="search"></i>自动探测</button>
+      <button class="btn" data-act="addExit"><i data-lucide="plus"></i>添加出口</button>
       <button class="btn" data-act="probe" id="pProbeBtn"><i data-lucide="radar"></i>探测全部</button>
     </div>
     <div id="pBody">${skeleton(4)}</div>`;
@@ -587,6 +589,9 @@ function onProxyClick(e) {
   if (act === 'mode') setMode(t.dataset.m);
   else if (act === 'probe') doProbe();
   else if (act === 'retry') loadProxy();
+  else if (act === 'addExit') openAddExit();
+  else if (act === 'discover') openDiscover();
+  else if (act === 'delExit') delExit(t.dataset.port);
 }
 
 async function loadProxy() {
@@ -611,13 +616,20 @@ function renderProxy() {
     : Object.values(d.results || {});          // 兼容后端将来改回对象形态
   const res = Object.fromEntries(list.map(r => [String(r.port), r]));
   const usable = new Set((d.usable || []).map(String));
-  // 端口全集 = 探测记录里的端口 ∪ usable；exits_configured 只是数量，拿不到未探测端口号，不瞎编
-  const ports = [...new Set([...Object.keys(res), ...usable])].sort((a, b) => a - b);
+  // 出口表本身（后端 status() 的 exits 字段）：port -> label。
+  // 这一项必须并进端口全集，否则「刚添加、还没探测」的出口在页面上根本不出现
+  // —— 用户点了添加、后端 200、settings.json 也写了，界面却一片空白。
+  const exitLabels = Object.fromEntries((d.exits || []).map(x => [String(x.port), x.label || '']));
+  // 端口全集 = 出口表 ∪ 探测记录 ∪ usable。
+  // 三个来源都要：出口表给「配了但没探过的」，results 给「探过但已从表里删掉的」历史记录，
+  // usable 兜底后端将来只给可用列表的情况。
+  const ports = [...new Set([...Object.keys(exitLabels), ...Object.keys(res), ...usable])]
+    .sort((a, b) => a - b);
   const oks = list.filter(r => r.ok && r.ms > 0);
   const avg = oks.length ? Math.round(oks.reduce((s, r) => s + r.ms, 0) / oks.length) : null;
   body.innerHTML = `
     <div class="statbar">
-      <div><b>${fmtInt(d.exits_configured)}</b>配置出口</div>
+      <div><b>${fmtInt(d.exits_configured ?? (d.exits || []).length)}</b>配置出口</div>
       <div><b class="tok">${usable.size}</b>可用出口</div>
       <div><b>${avg == null ? '—' : fmtDur(avg)}</b>平均延迟</div>
       <div><b>${tm(d.probed_at)}</b>最近探测</div>
@@ -626,12 +638,16 @@ function renderProxy() {
     ${d.mode === 'off' ? '<div class="note"><i data-lucide="info"></i>代理已关闭，所有请求走本机出口</div>' : ''}
     ${d.mode === 'fixed' && d.fixed_url ? `<div class="note"><i data-lucide="link"></i>固定代理：${esc(d.fixed_url)}</div>` : ''}
     ${proxy.probing ? '<div class="note" id="pProg">正在逐个探测出口…</div>' : ''}
-    ${ports.length ? `<div class="pgrid ${d.mode === 'off' ? 'dim' : ''}">${ports.map(p => portCard(p, res[p], usable.has(p))).join('')}</div>`
-      : '<div class="empty">尚未探测到任何出口，点击「探测全部」获取状态</div>'}`;
+    ${ports.length ? `<div class="pgrid ${d.mode === 'off' ? 'dim' : ''}">${ports.map(p => portCard(p, res[p], usable.has(p), exitLabels[p])).join('')}</div>`
+      : `<div class="empty">
+           <p>还没有配置任何出口。</p>
+           <p class="dim">如果本机跑着代理（gost / squid / v2ray 之类），点「自动探测」扫一遍；
+              也可以用「添加出口」手动填端口。不需要代理就把模式切到「关闭」，请求直接走本机出口。</p>
+         </div>`}`;
   refreshIcons();
 }
 
-function portCard(port, r, inUse) {
+function portCard(port, r, inUse, label) {
   // 未探测过的端口没有 results 记录：用灰点表示「未知」，不能误判成不可用
   const st = !r ? '' : (r.ok ? 'ok' : 'bad');
   // 后端字段名是 detail（不是 error）、cc（地区标签）；ms 由 probe_all 计时给出。
@@ -641,9 +657,13 @@ function portCard(port, r, inUse) {
   return `<div class="pcard">
     <div class="prow">
       <span class="dot ${st}"></span><b>:${esc(port)}</b>
-      ${r && r.cc ? `<span class="pcc">${esc(r.cc)}</span>` : ''}
+      ${(r && r.cc) || label ? `<span class="pcc">${esc((r && r.cc) || label)}</span>` : ''}
       ${inUse ? '<span class="tag">在用</span>' : ''}
       ${proxy.probing ? '<i data-lucide="loader-2" class="spin"></i>' : ''}
+      <span style="flex:1"></span>
+      <button class="pdel" data-act="delExit" data-port="${esc(port)}"
+              title="移出出口表" aria-label="移出出口表 ${esc(port)}">
+        <i data-lucide="x"></i></button>
     </div>
     <div class="pip">${ip}</div>
     <div class="pms">${r
@@ -688,6 +708,126 @@ async function doProbe() {
     if (btn) btn.disabled = false;
     renderProxy();
   }
+}
+
+/* ---- 出口表增删：出口拓扑是每台机器自己的事，不能写死在代码里 ---- */
+
+/** 端口合法性：后端 add_exit 对非法值抛 ValueError（→400），前端先挡一道给即时反馈 */
+function badPort(v) {
+  const n = Number(v);
+  if (!Number.isInteger(n) || n < 1 || n > 65535) return '端口必须是 1-65535 的整数';
+  return '';
+}
+
+function openAddExit() {
+  const m = openModal(`
+    <h3><i data-lucide="plus"></i>添加出口</h3>
+    <p class="modal-msg dim">填本机代理监听的端口。标签随便写，只是方便你认出它是哪条线路。</p>
+    <label class="field"><span>端口</span>
+      <input class="inp" id="axPort" type="number" min="1" max="65535" placeholder="例如 3128" /></label>
+    <label class="field"><span>标签（可选）</span>
+      <input class="inp" id="axLabel" type="text" maxlength="32" placeholder="例如 squid / HK / 家宽" /></label>
+    <div class="modal-err" id="axErr" hidden></div>
+    <div class="modal-foot">
+      <button class="btn ghost" data-close>取消</button>
+      <button class="btn primary" id="axOk">添加</button>
+    </div>`, { size: 'sm' });
+
+  const err = m.box.querySelector('#axErr');
+  const portInp = m.box.querySelector('#axPort');
+  const okBtn = m.box.querySelector('#axOk');
+  const showErr = (t) => { err.textContent = t; err.hidden = !t; };
+
+  okBtn.addEventListener('click', async () => {
+    const port = portInp.value.trim();
+    const bad = badPort(port);
+    if (bad) { showErr(bad); portInp.focus(); return; }
+    showErr('');
+    okBtn.disabled = true; okBtn.textContent = '添加中…';
+    try {
+      const r = await apiFetch('/api/proxy/exits', {
+        method: 'POST',
+        body: { port: Number(port), label: m.box.querySelector('#axLabel').value.trim() },
+      });
+      m.close();
+      toast(r.action === 'updated' ? `出口 :${port} 标签已更新` : `出口 :${port} 已添加`, 'ok');
+      await loadProxy();
+    } catch (e2) {
+      showErr(e2.message || '添加失败');
+      okBtn.disabled = false; okBtn.textContent = '添加';
+    }
+  });
+  portInp.focus();
+}
+
+async function delExit(port) {
+  if (!port) return;
+  const ok = await confirmDialog('移出出口表', `确定把出口 :${port} 从出口表里删掉？`
+    + '\n这只改本项目的配置，不会动那个端口上真正跑着的代理进程。',
+    { okText: '删除' });
+  if (!ok) return;
+  try {
+    await apiFetch('/api/proxy/exits/' + encodeURIComponent(port), { method: 'DELETE' });
+    toast(`出口 :${port} 已移除`, 'ok');
+    await loadProxy();
+  } catch (e) {
+    toast('删除失败：' + e.message, 'err');
+  }
+}
+
+function openDiscover() {
+  const m = openModal(`
+    <h3><i data-lucide="search"></i>自动探测出口</h3>
+    <p class="modal-msg dim">扫一段端口，看哪些能当 HTTP 代理用。只扫出口主机（当前
+      <code>${esc(proxy.data?.host || '127.0.0.1')}</code>），不会碰外网。</p>
+    <label class="field"><span>起始端口</span>
+      <input class="inp" id="dcFrom" type="number" min="1" max="65535" value="60001" /></label>
+    <label class="field"><span>结束端口</span>
+      <input class="inp" id="dcTo" type="number" min="1" max="65535" value="60030" /></label>
+    <label class="chk"><input type="checkbox" id="dcAdd" checked />
+      <span>把扫到的可用出口直接加入出口表</span></label>
+    <div class="modal-err" id="dcErr" hidden></div>
+    <div class="modal-foot">
+      <button class="btn ghost" data-close>取消</button>
+      <button class="btn primary" id="dcOk">开始探测</button>
+    </div>`, { size: 'sm' });
+
+  const err = m.box.querySelector('#dcErr');
+  const okBtn = m.box.querySelector('#dcOk');
+  const showErr = (t) => { err.textContent = t; err.hidden = !t; };
+
+  okBtn.addEventListener('click', async () => {
+    const from = m.box.querySelector('#dcFrom').value.trim();
+    const to = m.box.querySelector('#dcTo').value.trim();
+    const bad = badPort(from) || badPort(to);
+    if (bad) { showErr(bad); return; }
+    if (Number(from) > Number(to)) { showErr('起始端口不能大于结束端口'); return; }
+    // 后端对单次扫描量有上限（MAX_SCAN_PORTS），这里先给出可读提示，
+    // 否则用户填个 1-65535 只会收到一句干巴巴的 400。
+    if (Number(to) - Number(from) + 1 > 4096) {
+      showErr('一次最多扫 4096 个端口，范围太大请分几次扫');
+      return;
+    }
+    showErr('');
+    okBtn.disabled = true; okBtn.textContent = '探测中…';
+    try {
+      const r = await apiFetch('/api/proxy/discover', {
+        method: 'POST',
+        body: {
+          ranges: [[Number(from), Number(to)]],
+          add: m.box.querySelector('#dcAdd').checked,
+        },
+      });
+      m.close();
+      const n = (r.usable_ports || []).length;
+      toast(n ? `扫到 ${n} 个可用出口：${(r.usable_ports || []).join(', ')}`
+        : `扫了 ${fmtInt(r.scanned)} 个端口，没有可用出口`, n ? 'ok' : 'err');
+      await loadProxy();
+    } catch (e2) {
+      showErr(e2.message || '探测失败');
+      okBtn.disabled = false; okBtn.textContent = '开始探测';
+    }
+  });
 }
 
 /* ==================== reg ==================== */
@@ -836,7 +976,7 @@ function bindAutoForm() {
     const count = parseInt($('#autoCount', root).value, 10);
     const invite = $('#autoInvite', root).value;
     if (!Number.isInteger(count) || count < 1) { toast('注册数量至少为 1', 'warn'); return; }
-    if (!invite) { toast('请选择邀请码', 'warn'); return; }
+    // 邀请码可选：invite 为空时后端跳过绑定，注册流程不受影响
     const btn = form.querySelector('button[type="submit"]');
     btn.disabled = true;
     try {
@@ -862,8 +1002,7 @@ function bindManualForm() {
     const p = phone.value.trim();
     // 格式错误就地拦截，不把无效请求打到后端
     if (!PHONE_RE.test(p)) { setPhoneErr(true); phone.focus(); return; }
-    const invite = $('#mInvite', root).value;
-    if (!invite) { toast('请选择邀请码', 'warn'); return; }
+    const invite = $('#mInvite', root).value; // 空 = 不使用邀请码
     const btn = form.querySelector('button[type="submit"]');
     btn.disabled = true;
     try {
@@ -930,14 +1069,18 @@ async function loadInvites() {
 }
 
 function fillInviteSelects() {
+  // 必须有一个 value="" 的真实选项：下拉是自绘组件（selectify + dropdown），
+  // setOptions() 会把当前值落到第一个非 disabled 选项上，选项里没有空值时
+  // 用户根本没法把邀请码选成「不填」。加上它，「不带邀请码注册」才是可达状态。
+  // 放在末尾，默认仍然选中第一个真实邀请码。
   const opts = invitesCache.map(c =>
     `<option value="${escapeHtml(c.code)}">${escapeHtml(c.masked)} · ${escapeHtml(c.code)} · 已邀 ${c.valid_invited ?? 0}/${c.invited ?? 0}</option>`
-  ).join('');
+  ).join('') + '<option value="">不使用邀请码</option>';
   for (const id of ['#autoInvite', '#mInvite']) {
     const sel = $(id, root);
-    if (!sel) return;
+    if (!sel) continue;   // 原来是 return，第一个选择器缺失会连带跳过第二个
     const prev = sel.value;
-    sel.innerHTML = invitesCache.length ? opts : '<option value="">暂无可用邀请码</option>';
+    sel.innerHTML = opts;
     // 重载后尽量保留用户已选中的邀请码
     if (prev && invitesCache.some(c => c.code === prev)) sel.value = prev;
   }
@@ -1169,6 +1312,7 @@ function renderSessions(list) {
         <span class="badge acc">等待验证码</span>
         <span class="mono reg-sess-phone">${escapeHtml(s.phone)}</span>
         <span class="reg-sess-time">${fmtTime(s.created_at)}</span>
+        <span class="reg-sess-inv">${s.invite_code ? '邀请码 ' + escapeHtml(s.invite_code) : '无邀请码'}</span>
       </div>
       <div class="reg-sess-ops">
         <div class="field"><input inputmode="numeric" maxlength="8" placeholder="验证码" autocomplete="off"></div>

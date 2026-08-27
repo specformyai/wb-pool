@@ -99,3 +99,84 @@
   .job { flex-wrap: wrap; }
   .job-t { margin-left: 44px; width: 100%; text-align: left; }
 }
+
+/* ---------------------------------------------------------------- 运行时配置
+   设置页「运行时配置」卡片：一行一个配置项，右侧控件，下方来源标记。
+   来源用 default/env/runtime 三色区分 —— 用户要能一眼看出「这项到底是
+   我在面板改的，还是环境变量给的」，否则改了没生效时无从判断。 */
+
+.cfg-group { margin-bottom: 18px; }
+.cfg-group:last-child { margin-bottom: 0; }
+
+.cfg-gt {
+  font-size: 12px;
+  font-weight: 650;
+  letter-spacing: .04em;
+  text-transform: uppercase;
+  color: var(--fg-3);
+  margin: 0 0 10px;
+  padding-bottom: 6px;
+  border-bottom: 1px solid var(--line);
+}
+
+.cfg-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 260px);
+  gap: 10px 16px;
+  align-items: start;
+  padding: 11px 0;
+  border-bottom: 1px solid var(--line);
+}
+.cfg-row:last-child { border-bottom: 0; }
+
+.cfg-lab {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+}
+
+.cfg-lab > b {
+  font-size: 13.5px;
+  font-weight: 550;
+  color: var(--fg);
+}
+
+/* 说明文字：允许换行，长 cron 表达式和路径不要撑破布局 */
+.cfg-hint {
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--fg-3);
+  overflow-wrap: anywhere;
+}
+
+.cfg-ctl {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+}
+
+.cfg-ctl input,
+.cfg-ctl select {
+  width: 100%;
+  box-sizing: border-box;
+}
+
+/* 只读项（如出口表，在代理池页改）：显示当前值但不给输入框，
+   免得用户在这里编辑完发现没保存按钮 */
+.cfg-static {
+  font-size: 12.5px;
+  line-height: 1.6;
+  color: var(--fg-2);
+  padding: 8px 10px;
+  background: var(--bg-2);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  overflow-wrap: anywhere;
+}
+
+@media (max-width: 720px) {
+  .cfg-row { grid-template-columns: 1fr; gap: 8px; }
+  .cfg-ctl { max-width: 100%; }
+}
