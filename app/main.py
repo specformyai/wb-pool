@@ -31,10 +31,12 @@ from . import uoomsg as uum
 from .accounting import Ledger
 from .apikeys import KeyStore
 from .calllog import CallLog
-from .pool import Account, AccountPool
+from .pool import Account, AccountPool, classify_error
 from .proxies import DEFAULT_EXITS, ProxyManager, is_proxy_error
 from .register import Registrar
 from .auto_register import AutoRegistrar
+from .history import (HistoryFetcher, HistoryStore, build_sessions,
+                      summarize)
 from .upstream_sync import (STATIC_MODELS, static_models, merge_unlisted,
                             is_cache_expired, in_fail_cooldown,
                             load_models_cache as load_sync_cache, resolve_models,
@@ -87,6 +89,8 @@ pm = ProxyManager(mode=PROXY_MODE, host=PROXY_HOST, fixed_url=PROXY_FIXED,
                   exits=DEFAULT_EXITS, state_file=PROXY_STATE)
 registrar = Registrar(pool, pm)
 auto_registrar = AutoRegistrar(registrar, UOOMSG_TOKEN)
+history_store = HistoryStore(DATA_DIR / "history")
+history_fetcher = HistoryFetcher(pool, history_store, proxy_mgr=pm)
 # 出口故障时账号池要能自己换线重试
 pool.proxy_mgr = pm
 scheduler = BackgroundScheduler(timezone="Asia/Shanghai")
@@ -251,11 +255,19 @@ async def chat_completions(request: Request) -> Any:
     tried: list[str] = []
     # WebUI 调试以“按时释放”为优先，不在客户端停止后继续串行重试多个账号。
     max_tries = 1 if force_key or is_debug_request else min(3, max(1, len(pool.all())))
-    for _ in range(max_tries):
+    # 账号级故障（auth/quota）不算一次重试：这类失败说明「这个号废了」，
+    # 不是「这次请求失败了」。换号继续，另给一个按池子大小封顶的换号额度，
+    # 否则 acquire() 的 LRU 排序会把 last_used=0 的废号排在队头，几个废号
+    # 就能把 max_tries 吃光，好号一次都轮不到 —— 客户端直接吃 502。
+    swaps_left = 0 if (force_key or is_debug_request) else min(12, max(1, len(pool.all())))
+    while max_tries > 0:
         t0 = time.time()
         acc = _pick_account(force_key)
         if acc.masked() in tried:
-            continue
+            if swaps_left > 0:
+                swaps_left -= 1
+                continue
+            break
         tried.append(acc.masked())
         proxy = pm.pick()
         try:
@@ -280,6 +292,10 @@ async def chat_completions(request: Request) -> Any:
             if exc.code == 11102:
                 raise HTTPException(400, {"error": {"message": exc.msg, "code": exc.code,
                                                     "type": "invalid_request_error"}})
+            if classify_error(last_err) in ("auth", "quota") and swaps_left > 0:
+                swaps_left -= 1
+                continue
+            max_tries -= 1
             continue
         except _EmptyUpstreamStream:
             last_err = "上游返回空流"
@@ -288,6 +304,7 @@ async def chat_completions(request: Request) -> Any:
             if force_key:
                 raise HTTPException(502, {"error": {"message": last_err, "type": "upstream_error"}})
             pool.release(acc, error=last_err)
+            max_tries -= 1
             continue
         except Exception as exc:       # noqa: BLE001
             last_err = str(exc)[:200]
@@ -298,8 +315,12 @@ async def chat_completions(request: Request) -> Any:
             # 代理链路故障：拉黑该出口，换出口重试，不污染账号 last_error
             if is_proxy_error(last_err):
                 pm.mark_bad(proxy)
-                continue
+                if swaps_left > 0:
+                    swaps_left -= 1
+                    continue
+                break
             pool.release(acc, error=last_err)
+            max_tries -= 1
             continue
 
         cid = f"chatcmpl-{uuid.uuid4().hex[:24]}"
@@ -1024,6 +1045,13 @@ def get_pool() -> dict[str, Any]:
             # 本地时区（CST）写的，前端拿浏览器时区去比字符串会整天错一天
             # （UTC 浏览器实测 2026-08-26 vs 2026-08-25 → 整列渲染成 —）。
             "daily_grant_today": a.daily_grant_date == time.strftime("%Y-%m-%d"),
+            # 包级到期（见 app/upstream.py:parse_pkg_expiry）。区分「额度被花掉」
+            # 和「额度到期作废」——后者没有任何调用流水，只能从包体读。
+            "credits_expiring": a.credits_expiring,
+            "credits_expired": a.credits_expired,
+            "credits_expire_at": a.credits_expire_at,
+            "credits_expire_in_h": (round((a.credits_expire_at / 1000 - time.time()) / 3600, 1)
+                                    if a.credits_expire_at else None),
             "expires_at": a.expires_at, "expires_in_h": round(a.expires_in() / 3600, 1),
             "cooldown_until": a.cooldown_until,
         })
@@ -1050,16 +1078,38 @@ def api_refresh_balance() -> dict[str, Any]:
     return {"ok": True, "results": pool.refresh_balances(proxy=pm.pick())}
 
 
+# 调度策略的唯一权威定义。前端 loadRotation() 会用这个列表覆盖它自己
+# 硬编码的选项（pool.js 读 d.strategies 的 key/label），所以键名只在这里维护。
+# 早先前端写的是 round_robin/random/balance，跟后端的 lru/drain 完全不是一套，
+# 加上 POST 字段名也不一致（前端 strategy / 后端 mode），导致面板上切换策略
+# 从来没有真正生效过 —— 前端乐观更新先高亮成功，再弹一个报错 toast。
+ROTATION_STRATEGIES = [
+    {"key": "lru", "label": "轮询",
+     "desc": "取最久未使用的账号，请求摊到全池"},
+    {"key": "drain", "label": "耗尽优先",
+     "desc": "复用当前账号直到额度打光再换下一个"},
+    {"key": "expiry", "label": "到期优先",
+     "desc": "先用最快到期的账号，避免签到额度作废"},
+]
+
+
 @app.get("/api/pool/rotation", dependencies=[Depends(require_admin)])
 def api_rotation_get() -> dict[str, Any]:
-    return {"mode": pool.rotation_mode}
+    # mode 与 strategy 同值双写：前端 renderRotation 读的是 strategy，
+    # 而既有脚本/文档用的是 mode，两个都给才不会有一边读到 undefined。
+    return {"mode": pool.rotation_mode, "strategy": pool.rotation_mode,
+            "strategies": ROTATION_STRATEGIES}
 
 
 @app.post("/api/pool/rotation", dependencies=[Depends(require_admin)])
 async def api_rotation_set(request: Request) -> dict[str, Any]:
     b = await request.json()
-    ok, result = pool.set_rotation_mode(b.get("mode", ""))
-    return {"ok": ok, "mode": result if ok else pool.rotation_mode, "error": "" if ok else result}
+    # 兼容两种字段名：mode（后端/脚本口径）与 strategy（前端一直在发的）
+    want = (b.get("mode") or b.get("strategy") or "").strip()
+    ok, result = pool.set_rotation_mode(want)
+    mode = result if ok else pool.rotation_mode
+    return {"ok": ok, "mode": mode, "strategy": mode,
+            "strategies": ROTATION_STRATEGIES, "error": "" if ok else result}
 
 
 @app.post("/api/pool/checkin", dependencies=[Depends(require_admin)])
@@ -1498,6 +1548,71 @@ def api_get_accounts() -> dict[str, Any]:
         "total": len(accounts_data),
         "accounts": accounts_data,
     }
+
+# --------------------------------------------------------------------------- #
+# 历史对话（上游用量流水里的 input 字段）
+# --------------------------------------------------------------------------- #
+@app.get("/api/history/accounts", dependencies=[Depends(require_admin)])
+def api_history_accounts() -> dict[str, Any]:
+    """账号清单 + 各自的本地缓存状态。页面下拉框用这个。"""
+    out = []
+    for a in pool.all():
+        meta = history_store.meta(a.phone)
+        out.append({
+            "phone": a.phone, "masked": a.masked(), "status": a.status,
+            "label": a.label, "registered_at": a.registered_at,
+            "usable": a.usable(),
+            "cached": meta.get("cached", False),
+            "cached_at": meta.get("fetched_at", 0),
+            "cached_rows": meta.get("count", 0),
+        })
+    return {"accounts": out, "tasks": history_fetcher.list_tasks()}
+
+
+@app.post("/api/history/fetch", dependencies=[Depends(require_admin)])
+async def api_history_fetch(request: Request) -> dict[str, Any]:
+    """启动一次抓取。逐月分页要打几十到几百个上游请求，所以走异步任务 + 轮询。"""
+    b = await request.json()
+    phone = (b.get("phone") or "").strip()
+    if not phone:
+        raise HTTPException(400, "缺少 phone")
+    res = history_fetcher.start(phone)
+    if not res.get("ok"):
+        raise HTTPException(400, res.get("error") or "启动失败")
+    return res
+
+
+@app.get("/api/history/status/{task_id}", dependencies=[Depends(require_admin)])
+def api_history_status(task_id: str) -> dict[str, Any]:
+    t = history_fetcher.get(task_id)
+    if not t:
+        raise HTTPException(404, "任务不存在或已过期")
+    return t
+
+
+@app.get("/api/history/data", dependencies=[Depends(require_admin)])
+def api_history_data(phone: str, gap: int = 30) -> dict[str, Any]:
+    """
+    读缓存并切分成会话。gap 是会话切分间隔（分钟）—— 上游没有 conversationId，
+    只能按时间间隔推断会话边界，这是启发式。
+    """
+    d = history_store.load(phone)
+    if not d:
+        raise HTTPException(404, "该账号还没有抓取过，请先点「拉取」")
+    rows = d.get("rows") or []
+    return {
+        "phone": d.get("phone", phone), "masked": d.get("masked", ""),
+        "fetched_at": d.get("fetched_at", 0),
+        "months": d.get("months") or {}, "errors": d.get("errors") or [],
+        "summary": summarize(rows),
+        "sessions": build_sessions(rows, gap_min=gap),
+    }
+
+
+@app.delete("/api/history/data", dependencies=[Depends(require_admin)])
+def api_history_drop(phone: str) -> dict[str, Any]:
+    return {"ok": history_store.drop(phone)}
+
 
 STATIC_DIR = BASE_DIR / "web"
 if STATIC_DIR.exists():

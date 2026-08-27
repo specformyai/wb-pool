@@ -12,6 +12,7 @@ const ROUTES = [
   { id: 'chat',     name: '对话调试',  icon: 'messages-square',  mod: () => import('@/chat.js'), fn: 'Chat' },
   { id: 'pool',     name: '账号池',    icon: 'layers',           mod: () => import('@/pool.js') },
   { id: 'calls',    name: '调用监控',  icon: 'activity',         mod: () => import('@/pages.js'), fn: 'Calls' },
+  { id: 'history',  name: '历史对话',  icon: 'history',          mod: () => import('@/history.js') },
   { id: 'keys',     name: 'API Key',   icon: 'key-round',        mod: () => import('@/pages.js'), fn: 'Keys' },
   { id: 'rates',    name: '模型与倍率', icon: 'boxes',            mod: () => import('@/rates.js'), fn: 'Rates' },
   { id: 'reg',      name: '注册中心',  icon: 'user-plus',        mod: () => import('@/pages.js'), fn: 'Reg' },

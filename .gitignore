@@ -36,3 +36,17 @@ retest_*.py
 scan_*.py
 verify_*.py
 probe_*.py
+
+# 账号历史对话导出（含真实对话正文与手机号，绝不入库）
+usage_dump/
+dead_dump*/
+history_*.txt
+
+# 本轮一次性运维脚本（不是可复用工具）
+compare_accounts.py
+refresh_all.py
+restore_disabled.py
+
+# 被取代的产物：余额快照时间序列（本意是区分「真扣费」与「包到期」，
+# 现已由 get-user-request-usage 逐笔流水 + 包级到期感知直接解决），从未运行过
+scripts/balance_snapshot.py

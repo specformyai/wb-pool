@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import base64
 import json
+import os
 import random
 import re
 import time
@@ -21,6 +22,9 @@ import httpx
 
 COPILOT = "https://copilot.tencent.com"
 CONSOLE = "https://www.codebuddy.cn"
+SSO = "https://tencent.sso.codebuddy.cn"
+SSO_PREFIX = "/plugin"
+IDE_UA = "WorkBuddy/5.2.6"
 UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
       "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36")
 
@@ -106,6 +110,70 @@ def auth_headers(token: str) -> dict[str, str]:
     }
 
 
+# --------------------------------------------------------------------------- #
+# 包级到期感知（缝合自 wbswitch crates/wb-switch-core/src/modules/credits.rs）
+# --------------------------------------------------------------------------- #
+# 上游把每天签到的积分发成**一个个独立的资源包**，各自有各自的到期时间。
+# 积分消失有两条完全不同的路径，原先混在一起看不出区别：
+#   (a) 被真实消耗（get-user-request-usage 里有逐笔流水）
+#   (b) 包到期作废（无流水，静默归零）
+#
+# 时间字段的真实形态（实测 17 个包，与 wbswitch 的假设不同）：
+#   ExpiredTime       str  只有已终态包（Status=3）有值 = 实际消亡时刻
+#   DeductionEndTime  int(ms) 全都有值，但体验版是 2046972779000（2034 年）远期占位
+#   CycleEndTime      str  全都有值，体验版是 2026-08-31 23:59:59
+# 所以「计划到期」必须取 min(DeductionEndTime, CycleEndTime)。
+# wbswitch 是三个字段第一个非空即用，在这里会把体验版算成 2034 年到期。
+EXPIRING_SOON_H = float(os.environ.get("WB_EXPIRING_SOON_H", "72"))
+
+
+def _ts_ms(v: Any) -> int:
+    """把上游的时间值统一成 epoch 毫秒。字符串按本地时区（上游是 CST）解析。"""
+    if v in (None, "", 0):
+        return 0
+    if isinstance(v, (int, float)):
+        n = int(v)
+        # 秒 / 毫秒都可能出现，按量级判断（1e12 ms ≈ 2001 年）
+        return n if n > 1_000_000_000_000 else n * 1000
+    s = str(v).strip()
+    if not s:
+        return 0
+    for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M:%S", "%Y-%m-%d"):
+        try:
+            return int(time.mktime(time.strptime(s, fmt)) * 1000)
+        except ValueError:
+            continue
+    return 0
+
+
+def parse_pkg_expiry(raw: dict[str, Any], now_ms: int | None = None) -> dict[str, Any]:
+    """算单个包的到期状态。返回 {expire_at, expired_at, expired, expiring_soon}
+
+    expire_at  = 计划到期（ms，0=未知）
+    expired_at = 实际消亡（ms，0=还没消亡）—— 来自 ExpiredTime，只有终态包有
+    expired    = 已经失效（终态 / 已过计划到期）
+    expiring_soon = 还没失效，但计划到期落在 EXPIRING_SOON_H 小时内
+    """
+    now = now_ms if now_ms is not None else int(time.time() * 1000)
+
+    ded = _ts_ms(raw.get("DeductionEndTime"))
+    cyc = _ts_ms(raw.get("CycleEndTime"))
+    cands = [t for t in (ded, cyc) if t > 0]
+    expire_at = min(cands) if cands else 0
+
+    expired_at = _ts_ms(raw.get("ExpiredTime"))
+    # Status=3 是终态（实测历史包全是 3），0 是在用
+    terminal = str(raw.get("Status")) == "3" or expired_at > 0
+    expired = bool(terminal or (expire_at and expire_at <= now))
+
+    soon = False
+    if not expired and expire_at:
+        soon = 0 < expire_at - now <= EXPIRING_SOON_H * 3600 * 1000
+    return {"expire_at": expire_at, "expired_at": expired_at,
+            "expired": expired, "expiring_soon": soon}
+
+
+
 def decode_jwt(token: str) -> dict[str, Any]:
     try:
         payload = token.split(".")[1]
@@ -155,17 +223,26 @@ def get_balance(token: str, proxy: str | None = None,
             data = (j.get("data") or {}).get("Response", {}).get("Data", {}) or {}
             accs = data.get("Accounts") or []
             if accs:
-                pkgs = [{
-                    "name": a.get("PackageName"),
-                    "remain": float(a.get("CycleCapacityRemainPrecise") or 0),
-                    "capacity": float(a.get("CycleCapacity") or 0),
-                    "used": float(a.get("CapacityUsed") or 0),
-                    "cycle_end": a.get("CycleEndTime"),
-                    "unit": a.get("CapacityUnit") or "credits",
-                    "cycle_start": a.get("CycleStartTime"),
-                    "size": float(a.get("CycleCapacitySizePrecise") or 0),
-                    "status": a.get("Status"),
-                } for a in accs]
+                _now_ms = int(time.time() * 1000)
+                pkgs = []
+                for a in accs:
+                    _exp = parse_pkg_expiry(a, _now_ms)
+                    pkgs.append({
+                        "name": a.get("PackageName"),
+                        "remain": float(a.get("CycleCapacityRemainPrecise") or 0),
+                        "capacity": float(a.get("CycleCapacity") or 0),
+                        "used": float(a.get("CapacityUsed") or 0),
+                        "cycle_end": a.get("CycleEndTime"),
+                        "unit": a.get("CapacityUnit") or "credits",
+                        "cycle_start": a.get("CycleStartTime"),
+                        "size": float(a.get("CycleCapacitySizePrecise") or 0),
+                        "status": a.get("Status"),
+                        # 到期感知（见 parse_pkg_expiry 的字段说明）
+                        "expire_at": _exp["expire_at"],
+                        "expired_at": _exp["expired_at"],
+                        "expired": _exp["expired"],
+                        "expiring_soon": _exp["expiring_soon"],
+                    })
                 # 账号在腾讯侧的真实注册时间。
                 # 上游没有 user/info 之类端点（实测 16 条路径全 404），
                 # JWT 里也只有本次登录的 iat/auth_time。唯一可靠来源是
@@ -198,8 +275,24 @@ def get_balance(token: str, proxy: str | None = None,
                     _grant += p["size"]
                     if not _grant_at or cs < _grant_at:
                         _grant_at = cs
+                # 到期汇总：把「即将作废」的额度单独拆出来。
+                # remain 用 max(0,...) 钳位 —— 上游对超额消耗会回负数，
+                # 直接求和会让总额凭空变小（wbswitch credits.rs 也做了这个钳位）。
+                _soon_rem = round(sum(max(0.0, p["remain"]) for p in pkgs
+                                      if p["expiring_soon"]), 4)
+                _exp_rem = round(sum(max(0.0, p["remain"]) for p in pkgs
+                                     if p["expired"]), 4)
+                _soonest = 0
+                for p in pkgs:
+                    if p["expired"] or p["remain"] <= 0 or not p["expire_at"]:
+                        continue
+                    if not _soonest or p["expire_at"] < _soonest:
+                        _soonest = p["expire_at"]
                 return {
-                    "total": round(sum(p["remain"] for p in pkgs), 4),
+                    "total": round(sum(max(0.0, p["remain"]) for p in pkgs), 4),
+                    "expiring_soon_remaining": _soon_rem,
+                    "expired_remaining": _exp_rem,
+                    "soonest_expire_at": _soonest,
                     "daily_grant": round(_grant, 4),
                     "daily_grant_at": _grant_at,
                     "packages": pkgs,
@@ -329,30 +422,57 @@ def probe_model(token: str, model: str, proxy: str | None = None) -> dict[str, A
 # Token 刷新（Keycloak）
 # --------------------------------------------------------------------------- #
 def refresh_token(refresh_tok: str, proxy: str | None = None,
-                  timeout: float = 30.0) -> dict[str, Any]:
+                  timeout: float = 30.0,
+                  access_tok: str = "", domain: str = "") -> dict[str, Any]:
     """
-    Keycloak refresh_token grant。client_id=console。
+    刷新 access_token。走 CodeBuddy CLI 的真实链路（从 cli/dist/codebuddy.js
+    的 refreshSession 挖出）：
+
+        POST {SSO}/v2/plugin/auth/token/refresh
+        headers: X-Refresh-Token / X-Auth-Refresh-Source: plugin / X-Domain
+        响应: {"code":0,"data":{"accessToken","refreshToken","expiresIn",...}}
+
+    早先这里打的是 Keycloak 的 openid-connect/token + client_id=console，
+    对**所有**账号恒返 401 unauthorized_client —— 那不是账号问题，是端点用错了。
+    实测 active/disabled/exhausted 各状态账号在本端点均返回 200。
+
     返回 {"access_token","refresh_token","expires_at"} 或 {"error": ...}
     """
+    if not refresh_tok:
+        return {"error": "no refresh_token"}
+    url = f"{SSO}/v2{SSO_PREFIX}/auth/token/refresh"
+    headers = {
+        "X-Refresh-Token": refresh_tok,
+        "X-Auth-Refresh-Source": "plugin",
+        "X-Domain": domain or "www.codebuddy.cn",
+        "Content-Type": "application/json",
+        "User-Agent": IDE_UA,
+    }
+    if access_tok:
+        headers["Authorization"] = f"Bearer {access_tok}"
     try:
         with httpx.Client(proxy=proxy, timeout=timeout, follow_redirects=True) as c:
-            r = c.post(
-                f"{CONSOLE}/auth/realms/copilot/protocol/openid-connect/token",
-                data={"grant_type": "refresh_token", "refresh_token": refresh_tok,
-                      "client_id": "console"},
-                headers={"Content-Type": "application/x-www-form-urlencoded", "User-Agent": UA},
-            )
+            r = c.post(url, content=b"{}", headers=headers)
         if r.status_code != 200:
             return {"error": f"http {r.status_code}: {r.text[:200]}"}
         j = r.json()
-        at = j.get("access_token")
+        if j.get("code") not in (0, None):
+            return {"error": f"code {j.get('code')}: {str(j.get('msg'))[:150]}"}
+        d = j.get("data") if isinstance(j.get("data"), dict) else j
+        at = (d or {}).get("accessToken")
         if not at:
-            return {"error": f"no access_token: {r.text[:200]}"}
-        dec = decode_jwt(at)
+            return {"error": f"no accessToken: {r.text[:200]}"}
+        # expiresAt 优先；缺失时用 expiresIn 换算（复刻 CLI calculateExpiresAt）
+        exp = d.get("expiresAt") or 0
+        if not exp:
+            if d.get("expiresIn"):
+                exp = int(time.time() * 1000) + int(d["expiresIn"]) * 1000
+            else:
+                exp = int(decode_jwt(at).get("exp", 0)) * 1000
         return {
             "access_token": at,
-            "refresh_token": j.get("refresh_token") or refresh_tok,
-            "expires_at": int(dec.get("exp", 0)) * 1000,
+            "refresh_token": d.get("refreshToken") or refresh_tok,
+            "expires_at": int(exp),
         }
     except Exception as exc:  # noqa: BLE001
         return {"error": str(exc)[:200]}

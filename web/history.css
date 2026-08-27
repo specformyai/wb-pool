@@ -1,0 +1,87 @@
+/* ===== history 历史对话页 =====
+ *
+ * 布局与 chat 页同构：左侧会话列表，右侧消息流。
+ * 气泡复用 chat.css 的 .chat-bubble（同一套视觉语言），这里只补
+ * 本页独有的容器、列表项、进度条和 chip。
+ *
+ * 变量名一律用 shared.css :root 里确实存在的那套（--bg-1/--bg-2/--line/
+ * --fg-2/--fg-3/--acc/--bad/--warn），不要自造 —— var() 名字写错是静默失效，
+ * 表现为「元素在但没有底色和圆角」，极难归因。
+ */
+
+.page-history { display:flex; flex-direction:column; height:100%; min-height:0; gap:12px; }
+
+/* ---- 顶部控制条 ---- */
+.hist-ctl { padding:14px 16px; }
+.hist-ctl-row { display:flex; align-items:flex-end; flex-wrap:wrap; gap:12px; }
+.hist-ctl-row .field { margin:0; font-size:13px; }
+.hist-f-acc { min-width:260px; }
+.hist-f-gap { width:120px; }
+.hist-acts { display:flex; align-items:center; gap:8px; margin-left:auto; }
+
+/* ---- 抓取进度 ---- */
+.hist-prog { margin-top:12px; display:flex; flex-direction:column; gap:6px; }
+.hist-prog-t { font-size:12px; color:var(--fg-2); display:flex; gap:10px; flex-wrap:wrap; }
+.hist-prog-bar { height:4px; border-radius:2px; background:var(--bg-2); overflow:hidden; position:relative; }
+.hist-prog-bar > span { display:block; height:100%; background:var(--acc); border-radius:2px; transition:width .3s var(--ease); }
+
+/* ---- 说明 / 警示 ---- */
+.hist-note { font-size:12px; color:var(--fg-3); line-height:1.6; margin-top:10px; }
+.hist-note-bad { color:var(--warn); }
+
+/* ---- 主体两栏 ---- */
+.hist-main { flex:1; min-height:0; display:grid; grid-template-columns:300px minmax(0,1fr); gap:14px; }
+
+/* ---- 左：会话列表 ---- */
+.hist-side { min-height:0; display:flex; flex-direction:column; padding:0; overflow:hidden; }
+.hist-slist { flex:1; min-height:0; overflow-y:auto; display:flex; flex-direction:column; }
+.hist-sitem { text-align:left; background:none; border:none; border-bottom:1px solid var(--line);
+  padding:10px 14px; cursor:pointer; display:flex; flex-direction:column; gap:4px;
+  color:var(--fg-2); transition:background .15s; }
+.hist-sitem:hover { background:var(--panel); }
+.hist-sitem.on { background:color-mix(in srgb, var(--acc) 12%, transparent);
+  box-shadow:inset 2px 0 0 var(--acc); }
+.hist-sitem-t { font-size:13px; color:var(--fg); line-height:1.45; word-break:break-word;
+  display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical; overflow:hidden; }
+.hist-sitem-m { font-size:11.5px; color:var(--fg-3); display:flex; gap:8px; flex-wrap:wrap; }
+.hist-sitem-mo { font-size:11px; color:var(--fg-3); font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; }
+
+/* ---- 右：消息流 ---- */
+.hist-conv { min-height:0; display:flex; flex-direction:column; padding:0; overflow:hidden; }
+.hist-msgs { flex:1; min-height:0; overflow-y:auto; display:flex; flex-direction:column;
+  gap:16px; padding:16px; }
+.hist-msg { display:flex; flex-direction:column; gap:5px; align-self:flex-end;
+  align-items:flex-end; max-width:min(80%, 780px); }
+/* 上游只返回用户侧 input，没有助手回复，所以全部气泡靠右单侧排布。
+   这不是样式偷懒 —— 接口就没有另一侧的数据。 */
+.hist-bubble { padding:10px 14px; border-radius:14px 14px 4px 14px;
+  background:color-mix(in srgb, var(--acc) 13%, var(--bg-2));
+  border:1px solid color-mix(in srgb, var(--acc) 32%, var(--line));
+  white-space:pre-wrap; word-break:break-word; line-height:1.65; font-size:14px; color:var(--fg); }
+.hist-mmeta { font-size:11.5px; color:var(--fg-3); display:flex; gap:10px; flex-wrap:wrap;
+  padding:0 2px; font-variant-numeric:tabular-nums; }
+.hist-nocontent { align-self:center; max-width:none; }
+.hist-nocontent .hist-bubble { background:var(--bg-2); border:1px dashed var(--line);
+  border-radius:10px; color:var(--fg-3); font-size:12.5px; }
+
+/* ---- chip ---- */
+.hist-chips { display:flex; gap:6px; flex-wrap:wrap; padding:10px 14px; border-bottom:1px solid var(--line); }
+.hist-chip { font-size:11.5px; color:var(--fg-2); background:var(--bg-2);
+  border:1px solid var(--line); border-radius:999px; padding:2px 9px;
+  font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; }
+
+/* ---- 响应式 ---- */
+@media (max-width: 960px) {
+  .hist-main { grid-template-columns:minmax(0,1fr); }
+  .hist-side { max-height:34vh; }
+  .hist-acts { margin-left:0; width:100%; }
+  .hist-f-acc { min-width:0; flex:1; }
+  .hist-msg { max-width:94%; }
+}
+
+/* JS 里会用 .empty-state.sm 做侧栏内的小号空态，全站没有这个变体，在此补齐 */
+.page-history .empty-state.sm { padding:26px 12px; gap:6px; }
+.page-history .empty-state.sm i { width:26px; height:26px; }
+.page-history .empty-state.sm i svg { width:26px; height:26px; }
+.page-history .empty-state.sm .t { font-size:13px; }
+.page-history .empty-state.sm .s { font-size:12px; }

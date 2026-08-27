@@ -79,6 +79,7 @@ def classify_error(err: str) -> str:
         return "auth"
     return "other"
 
+AUTH_FAIL_LIMIT = int(os.environ.get("WB_AUTH_FAIL_LIMIT", "2"))
 EXHAUST_COOLDOWN = 12 * 3600      # 配额耗尽冷却 12h（上游按自然日重置，双次重试窗口）
 REFRESH_AHEAD = 3600              # 过期前 1h 主动刷新
 
@@ -117,6 +118,19 @@ class Account:
     # 于是面板上永远是 0。这两个字段由 refresh_balances() 从包体反推。
     daily_grant_credit: float = 0.0
     daily_grant_date: str = ""
+    # 连续 auth 类失败次数（11140/401/403）。上游对被封账号的聊天接口恒回
+    # 11140 request illegal，而余额接口照样 200 —— 所以「token 能查余额」
+    # 不能证明账号可用，只有真实聊天请求的回执算数。达到 AUTH_FAIL_LIMIT
+    # 就永久出候选池，避免废号靠 last_used=0 抢在队头把重试预算吃光。
+    # 成功一次即归零，防止网络抖动误杀好号。
+    auth_fail_count: int = 0
+    # 包级到期感知（缝合自 wbswitch）。上游把签到积分发成一个个独立的包，
+    # 各自到期。积分消失有两条路径：被消耗（有流水）/ 包到期作废（无流水）。
+    # 这三个字段由 refresh_balance() 从包体填，用来在面板上把「即将作废的
+    # 额度」单独标出来，以及给 rotation_mode="expiry" 做排序依据。
+    credits_expiring: float = 0.0        # 72h 内到期且还有余额的额度
+    credits_expired: float = 0.0         # 已作废但上游仍列在包里的额度
+    credits_expire_at: int = 0           # 最快到期的有余额包的到期时刻（ms）
     note: str = ""
 
     def checkin_settled(self, today: str) -> bool:
@@ -129,6 +143,10 @@ class Account:
 
     def usable(self) -> bool:
         if self.status in ("dead", "disabled"):
+            return False
+        # 连续 auth 失败到顶：上游已经明确拒绝这个号的聊天接口，再轮到它
+        # 只会白烧一次请求并挤掉好号的重试机会。
+        if self.auth_fail_count >= AUTH_FAIL_LIMIT:
             return False
         if self.status == "exhausted" and time.time() < self.cooldown_until:
             return False
@@ -160,7 +178,8 @@ class AccountPool:
         self._lock = threading.RLock()
         self._accounts: list[Account] = []
         self._mtime = 0.0
-        # rotation_mode: "lru" = 轮询（负载均衡），"drain" = 优先耗尽当前账号
+        # rotation_mode: "lru" = 轮询（负载均衡），"drain" = 优先耗尽当前账号，
+        #                "expiry" = 到期优先（先花快作废的额度，缝合自 wbswitch）
         self._state_file = self.path.parent / "pool_state.json"
         self.rotation_mode: str = "lru"
         # 由 main.py 注入的 ProxyManager，用于出口故障时换线重试
@@ -174,7 +193,7 @@ class AccountPool:
             if self._state_file.exists():
                 st = json.loads(self._state_file.read_text(encoding="utf-8"))
                 m = str(st.get("rotation_mode") or "lru").lower()
-                if m in ("lru", "drain"):
+                if m in ("lru", "drain", "expiry"):
                     self.rotation_mode = m
         except Exception:  # noqa: BLE001
             pass
@@ -189,8 +208,8 @@ class AccountPool:
 
     def set_rotation_mode(self, mode: str) -> tuple[bool, str]:
         m = (mode or "").lower().strip()
-        if m not in ("lru", "drain"):
-            return False, f"未知策略 {mode}（只支持 lru / drain）"
+        if m not in ("lru", "drain", "expiry"):
+            return False, f"未知策略 {mode}（只支持 lru / drain / expiry）"
         with self._lock:
             self.rotation_mode = m
             self._save_state()
@@ -279,6 +298,7 @@ class AccountPool:
             if status == "active":
                 acc.cooldown_until = 0.0
                 acc.last_error = ""
+                acc.auth_fail_count = 0
             self.save()
             return True
 
@@ -309,6 +329,12 @@ class AccountPool:
                 # 最近用过的排最前；同时把余额少的排前面，先把零头打光。
                 # last_used=0（从没用过）排最后，避免每次都拉一个新号进来。
                 cands.sort(key=lambda a: (-a.last_used, a.credits_total))
+            elif mode == "expiry":
+                # 到期优先（缝合自 wbswitch rotate.rs 的「防止积分过期浪费」）：
+                # 先用最快到期的号，把快作废的额度花掉。credits_expire_at=0
+                # 表示未知到期时间，排到最后而不是最前 —— 未知不等于紧急。
+                cands.sort(key=lambda a: (a.credits_expire_at or (1 << 62),
+                                          a.last_used))
             else:
                 cands.sort(key=lambda a: a.last_used)
             acc = cands[0]
@@ -336,14 +362,18 @@ class AccountPool:
         return acc, ""
 
     def try_refresh(self, acc: Account, proxy: str | None = None) -> bool:
-        res = upstream.refresh_token(acc.refresh_token, proxy=proxy)
+        res = upstream.refresh_token(
+            acc.refresh_token, proxy=proxy,
+            access_tok=acc.access_token, domain=getattr(acc, "domain", ""),
+        )
         with self._lock:
             if res.get("error"):
                 acc.last_error = f"refresh failed: {res['error']}"[:300]
-                # 注意：不能因为 refresh 失败就把账号标 dead。
-                # 上游 Keycloak 的 client_id=console 不接受 refresh_token grant，
-                # 对**所有**账号都返回 401 unauthorized_client（181 正常号实测同样 401）。
-                # access_token 本身有效期约 60 天，判活只看对话/余额路径。
+                # 走的是 CLI 真实链路（SSO /v2/plugin/auth/token/refresh），
+                # 实测各状态账号均能 200 —— 所以这里失败是真失败，不再是
+                # 早先那个"端点用错导致恒 401"的假象。
+                # 但仍不标 dead：access_token 本身有效期约 60 天，
+                # 判活只看对话/余额路径。
                 self.save()
                 return False
             acc.access_token = res["access_token"]
@@ -371,9 +401,12 @@ class AccountPool:
                     acc.credits_total = 0.0
                     acc.credits_checked_at = time.time()
                 elif kind == "auth":
-                    acc.status = "dead"
+                    acc.auth_fail_count += 1
+                    if acc.auth_fail_count >= AUTH_FAIL_LIMIT:
+                        acc.status = "dead"
             else:
                 acc.last_error = ""
+                acc.auth_fail_count = 0
                 if acc.status == "exhausted" and time.time() >= acc.cooldown_until:
                     acc.status = "active"
             self.save()
@@ -414,6 +447,10 @@ class AccountPool:
             if bal.get("total", -1) >= 0:
                 acc.credits_total = bal["total"]
                 acc.credits_checked_at = time.time()
+                # 包级到期状态（见 upstream.parse_pkg_expiry）
+                acc.credits_expiring = float(bal.get("expiring_soon_remaining") or 0)
+                acc.credits_expired = float(bal.get("expired_remaining") or 0)
+                acc.credits_expire_at = int(bal.get("soonest_expire_at") or 0)
                 # 今日签到奖励到账额（从包体反推，见 upstream.get_balance）
                 if bal.get("daily_grant_at"):
                     acc.daily_grant_credit = float(bal.get("daily_grant") or 0)
@@ -589,6 +626,10 @@ class AccountPool:
             "credits_total": cr_usable,
             "credits_total_all": cr_all,
             "credits_unusable": round(cr_all - cr_usable, 2),
+            # 到期汇总只算可用号 —— dead/disabled 号上的额度本来就取不出来，
+            # 混进「即将作废」会让这个数字失去行动意义。
+            "credits_expiring": round(sum(a.credits_expiring for a in usable), 2),
+            "credits_expired": round(sum(a.credits_expired for a in accs), 2),
             "credits_spent": round(sum(a.credits_spent for a in accs), 4),
             "requests": sum(a.request_count for a in accs),
             "tokens": sum(a.token_count for a in accs),

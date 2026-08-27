@@ -373,8 +373,9 @@ async function loadAccounts(showSkeleton = true) {
 }
 
 // ---------- 调度策略 ----------
-const ROT_LABEL = { round_robin: '轮询', random: '随机', balance: '余额优先', least_used: '最少使用', weight: '加权' };
-let rotOptions = ['round_robin', 'random', 'balance'].map(k => ({ key: k, label: ROT_LABEL[k] }));
+const ROT_LABEL = { lru: '轮询', drain: '耗尽优先', expiry: '到期优先',
+  round_robin: '轮询', random: '随机', balance: '余额优先', least_used: '最少使用', weight: '加权' };
+let rotOptions = ['lru', 'drain', 'expiry'].map(k => ({ key: k, label: ROT_LABEL[k] }));
 function renderRotation(current) {
   if (current) state.rotation = current;
   $('#rotSeg').innerHTML = rotOptions.map(o =>
@@ -729,7 +730,7 @@ async function init() {
   state.q = state.q ?? '';
   state.status = state.status ?? 'all';
   state.balance = state.balance ?? 'all';
-  state.rotation = state.rotation || 'round_robin';
+  state.rotation = state.rotation || 'lru';
   bindEvents();
   renderRotation(state.rotation);
   renderStats(); renderTable(); renderCards(); renderBatch();
@@ -908,7 +909,7 @@ export async function mount(root) {
   state.q = state.q ?? '';
   state.status = state.status ?? 'all';
   state.balance = state.balance ?? 'all';
-  state.rotation = state.rotation || 'round_robin';
+  state.rotation = state.rotation || 'lru';
 
   bindEvents();
   renderRotation(state.rotation);
