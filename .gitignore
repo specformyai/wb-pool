@@ -42,6 +42,7 @@ probe_*.py
 # 否则它们会被静默忽略，本地跑得通、推上去别人却拿不到。
 !tests/verify_*.py
 !scripts/verify_*.py
+!deploy/verify_*.py
 
 # 补丁脚本留下的时间戳备份。改代码前备份是对的，但它们是本地回滚用的，
 # 不该进版本库（git 本身就是版本库）。
