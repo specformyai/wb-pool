@@ -189,10 +189,18 @@ function renderChangePassword(root, user) {
     errBox.hidden = true;
     setBusy(true);
     try {
-      // 后端两套键都收，这里用语义更清楚的那套
+      // 两套键都发。老后端（比如还没升级的部署）只读 old/new，新后端两套都收，
+      // 多余的键会被忽略 —— 所以同时发能兼容两边。
+      //
+      // 这不是洁癖：实测过一台只认 old/new 的部署，前端发 old_password/new_password
+      // 时后端读到空字符串，报的却是「新密码至少 6 位」，看着像是校验规则不对，
+      // 完全指不到键名上。同时发就没这个歧义了。
       await apiFetch(AUTH_PASSWORD, {
         method: 'POST',
-        body: { old_password: oldPw, new_password: newPw },
+        body: {
+          old: oldPw, new: newPw,
+          old_password: oldPw, new_password: newPw,
+        },
       });
       // 改密会踢掉所有 session，所以必须重新登录 —— 回到登录表单而不是跳主界面
       toast('密码已修改，请用新密码登录');
