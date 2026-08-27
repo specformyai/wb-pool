@@ -71,22 +71,109 @@ WorkBuddy / CodeBuddy 账号池反向代理。把账号的 token 池化，统一
 WebUI「注册中心」填**你自己的手机号** → 服务端协议级请求短信 → 你把收到的验证码填进第二步 →
 自动换 token、查余额、入池。也支持直接粘贴已有的 `access_token` 手动导入。
 
-## 部署
+## 快速开始
+
+三条命令，不需要代理池、不需要接码平台，起来就能用：
 
 ```bash
-cp .env.example .env      # 填 WB_API_KEY
+cp .env.example .env                 # 至少改 WB_API_KEY / WB_ADMIN_KEY
 python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
 .venv/bin/python -m uvicorn app.main:app --host 127.0.0.1 --port 9188
 ```
 
-systemd 单元见 `deploy/wb-pool.service`，一键安装见 `deploy/setup_165.sh`，
-端到端验证脚本见 `deploy/verify_165.py`。
+打开 http://127.0.0.1:9188 —— 会跳到 `/login`，默认账号 **admin / admin**。
 
-WebUI 走账号密码 + `wb_session` cookie（默认 admin/admin，首次登录会强提示改密），
-反代 key 在面板里生成、可多把并独立启停。
+**首次登录必须改密码**：没改之前服务端会锁住除登录/改密以外的所有接口
+（403 + `need_password_change`）。这是防止有人把带默认密码的面板直接挂到公网。
+忘记密码就删掉 `data/webauth.json` 重启，会重新按 `WB_ADMIN_USER` / `WB_ADMIN_PASS` 建账号。
 
-前端改动后必须重算 `web/index.html` 里 importmap 的 `?v=<sha1>` ——
-ES module 有独立于 HTTP 缓存的模块图缓存，哈希不变浏览器就一直用旧文件。
+改完密码之后，剩下的配置都在 WebUI「设置 → 运行时配置」里填，改完立即生效不用重启：
+
+| 想做什么 | 去哪 |
+|---|---|
+| 加账号 | 「注册中心」填自己的手机号，或直接粘贴已有 `access_token` |
+| 生成反代 key | 「API Key」页，可多把、可单独启停 |
+| 填接码平台 token | 「设置 → 接码平台」（也可以用 `WB_UOOMSG_TOKEN`） |
+| 配出口代理 | 「代理池」页手动加端口，或点「自动探测」扫一段 |
+| 改签到时间 / 余额刷新间隔 | 「设置 → 运行时配置」 |
+
+配置优先级是 **面板设置 > 环境变量 > 代码默认值**，面板改的值存在 `data/settings.json`。
+所以 `.env` 只需要填最少的两把密钥，别的都能事后在界面上调。
+
+## 部署
+
+### Docker
+
+```bash
+cp .env.example .env
+docker compose up -d
+```
+
+数据挂在 `./data`，容器重建不丢。镜像里不含任何真实数据（`.dockerignore` 挡掉了 `data/` 和 `.env`）。
+
+### systemd
+
+```bash
+sudo ./deploy/install-systemd.sh                       # 默认装到当前目录、当前用户、9188
+sudo WB_ROOT=/opt/wb-pool WB_USER=wbpool WB_PORT=9188 \
+     ./deploy/install-systemd.sh                       # 或者显式指定
+```
+
+脚本会建 venv、装依赖、生成 `.env`（密钥随机）、替换 `deploy/wb-pool.service`
+里的占位符再装进 systemd。**那个 `.service` 是模板，别直接 cp** —— 里面的
+`__WB_ROOT__` / `__WB_USER__` / `__WB_PORT__` 需要替换。
+
+部署完跑一遍端到端验证（会打真实上游，需要池里有号）：
+
+```bash
+.venv/bin/python deploy/verify_deploy.py
+```
+
+### 对外暴露
+
+服务默认只绑 `127.0.0.1`。要对外提供服务就在前面放 nginx / caddy 终结 TLS，
+**反代必须关掉响应缓冲**，否则流式输出会被攒成一坨最后一起吐出来：
+
+```nginx
+location / {
+    proxy_pass http://127.0.0.1:9188;
+    proxy_http_version 1.1;
+    proxy_set_header Host $host;
+    proxy_set_header X-Forwarded-Proto $scheme;   # 让 Cookie 的 Secure 判断生效
+    proxy_buffering off;                          # SSE 必须
+    proxy_read_timeout 1800s;                     # 思考模型单次可能跑十几分钟
+}
+```
+
+不要直接把 9188 开到公网 —— 管理面板和账号 token 都在这个端口上。
+
+## 开发
+
+```bash
+# 全部离线测试（假上游，不打网络、不烧接码余额）
+for f in tests/test_*.py; do PYTHONPATH=. .venv/bin/python "$f"; done
+node tests/test_chat_utils.js
+
+# 冷启动冒烟：全新实例什么都没配也能起来
+PYTHONPATH=. .venv/bin/python tests/smoke_cold_start.py
+```
+
+浏览器端的渲染验证（需要一个 headless Chrome 开着 CDP 端口）：
+
+```bash
+WB_VERIFY_PORT=8931 .venv/bin/python tests/serve_verify.py &     # 隔离实例
+WB_VERIFY_BASE=http://127.0.0.1:8931 .venv/bin/python tests/verify_login_ui.py
+WB_VERIFY_BASE=http://127.0.0.1:8931 .venv/bin/python tests/verify_pages_ui.py
+```
+
+⚠️ **改了 `web/*.js` 或 `web/*.css` 必须重算资源哈希**：
+
+```bash
+python scripts/bump_static_version.py
+```
+
+ES module 有独立于 HTTP 缓存的模块图缓存，`?v=<sha1>` 不变浏览器就一直用旧文件
+—— 你本地测得通，用户刷新一百次还是旧的。CI 会把「哈希过期」判成硬失败。
 
 ## 接入
 

@@ -1,17 +1,46 @@
+# wb-pool systemd 单元模板
+#
+# 里面的 __WB_ROOT__ / __WB_USER__ / __WB_PORT__ 是占位符，别直接 cp 到
+# /etc/systemd/system/ —— 用 deploy/install-systemd.sh 自动替换，或者手动 sed：
+#
+#   sed -e "s|__WB_ROOT__|/opt/wb-pool|g" \
+#       -e "s|__WB_USER__|wbpool|g" \
+#       -e "s|__WB_PORT__|9188|g" \
+#       deploy/wb-pool.service | sudo tee /etc/systemd/system/wb-pool.service
+#
+# 之前这个文件写死了某台机器的路径和 root 用户，换机器必然起不来。
+
 [Unit]
-Description=wb-pool (WorkBuddy account pool reverse proxy)
+Description=wb-pool (WorkBuddy/CodeBuddy account pool reverse proxy)
+Documentation=https://github.com/specformyai/wb-pool
 After=network-online.target
 Wants=network-online.target
 
 [Service]
 Type=simple
-WorkingDirectory=/opt/wb-pool
-EnvironmentFile=/opt/wb-pool/.env
-ExecStart=/opt/wb-pool/.venv/bin/python -m uvicorn app.main:app --host 127.0.0.1 --port 9188 --log-level info
+User=__WB_USER__
+Group=__WB_USER__
+WorkingDirectory=__WB_ROOT__
+EnvironmentFile=-__WB_ROOT__/.env
+ExecStart=__WB_ROOT__/.venv/bin/python -m uvicorn app.main:app \
+    --host 127.0.0.1 --port __WB_PORT__ --log-level info
 Restart=always
 RestartSec=5
-StandardOutput=append:/var/log/wb-pool.log
-StandardError=append:/var/log/wb-pool.log
+
+# 只绑 127.0.0.1：要对外服务就在前面放 nginx/caddy 终结 TLS。
+# 直接把这个端口开到公网等于把管理面板裸奔在互联网上。
+
+# 日志走 journald，用 journalctl -u wb-pool 看。
+# 不写 /var/log/*.log 是因为那需要预先建文件并给权限，非 root 用户常写不进去。
+StandardOutput=journal
+StandardError=journal
+
+# 加固：这个服务只需要读自己的代码、写自己的 data/
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=true
+ReadWritePaths=__WB_ROOT__/data
 
 [Install]
 WantedBy=multi-user.target

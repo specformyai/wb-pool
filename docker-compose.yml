@@ -1,0 +1,36 @@
+# docker compose up -d
+#
+# 起之前：cp .env.example .env 并至少设好 WB_API_KEY / WB_ADMIN_KEY。
+# 其余配置起来之后在 WebUI「设置 → 运行时配置」里改，改完立刻生效。
+
+services:
+  wb-pool:
+    build: .
+    image: wb-pool:latest
+    container_name: wb-pool
+    restart: unless-stopped
+
+    # ⚠️ 只绑本机。要对外提供服务就在前面放 nginx/caddy 终结 TLS，
+    #    不要直接把 9188 开到公网。
+    ports:
+      - "127.0.0.1:9188:9188"
+
+    env_file:
+      - .env
+
+    # 账号池、API Key、运行时配置、账本都在这个卷里。别删。
+    volumes:
+      - ./data:/app/data
+
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:9188/api/health"]
+      interval: 30s
+      timeout: 5s
+      start_period: 20s
+      retries: 3
+
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"

@@ -1,0 +1,30 @@
+# 构建上下文瘦身 + 防止把凭据/真实数据烤进镜像层
+.git/
+.github/
+.venv/
+__pycache__/
+*.pyc
+
+# 真实运行数据：账号 token、手机号、账本。绝不进镜像。
+data/
+usage_dump/
+dead_dump*/
+history_*.txt
+
+# 凭据
+.env
+
+# 备份与打包产物
+*.bak-*
+*.tar.gz
+*.tmp
+
+# 根目录一次性诊断脚本（.gitignore 里也挡着，这里再挡一层）
+patch_*.py
+probe_*.py
+verify_*.py
+check_*.py
+diag_*.py
+dump_*.py
+inspect_*.py
+drop_*.py

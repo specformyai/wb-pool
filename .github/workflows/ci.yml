@@ -1,0 +1,181 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+  workflow_dispatch:
+
+# CI 全程不打真实上游：所有测试都 monkeypatch 掉 upstream，
+# 也不配 WB_UOOMSG_TOKEN，所以不会取号、不会发短信、不烧接码余额。
+env:
+  WB_PROXY_MODE: "off"
+  WB_BALANCE_INTERVAL_MIN: "9999"
+  WB_CHECKIN_CRON: ""
+  WB_UOOMSG_TOKEN: ""
+
+jobs:
+  python-tests:
+    name: 离线测试
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: 装依赖
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: 跑全部测试
+        # 这些脚本是 assert 式的独立文件，不是 pytest 用例，直接执行。
+        # PYTHONPATH=. 是必须的：部分脚本 import app.* 时依赖仓库根在路径里。
+        run: |
+          set -u
+          fail=0
+          for f in tests/test_*.py; do
+            echo "──────── $f"
+            if PYTHONPATH=. python "$f"; then
+              echo "   OK"
+            else
+              echo "   FAIL: $f"
+              fail=1
+            fi
+          done
+          exit $fail
+
+  frontend-checks:
+    name: 前端语法与缓存版本
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: node --check 所有前端模块
+        run: |
+          set -u
+          fail=0
+          for f in web/*.js; do
+            node --check "$f" || { echo "FAIL: $f"; fail=1; }
+          done
+          exit $fail
+
+      - name: 前端纯函数单测
+        run: node tests/test_chat_utils.js
+
+      - name: importmap 哈希必须是最新的
+        # 改了 web/*.js 或 *.css 却忘了跑 bump 脚本，浏览器会一直用缓存的旧模块
+        # —— 本地测得通、用户刷新一百次还是旧文件。这一步把它变成硬失败。
+        run: |
+          python scripts/bump_static_version.py
+          if ! git diff --exit-code -- web/index.html web/login.html; then
+            echo
+            echo "::error::静态资源哈希过期。本地跑 'python scripts/bump_static_version.py' 后一起提交。"
+            exit 1
+          fi
+
+  smoke:
+    name: 冷启动冒烟
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: 装依赖
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: 冷启动断言（进程内，30 项）
+        # 这一步用 TestClient 在进程内跑完整启动流程，覆盖闸门/配置层/降级清单，
+        # 断言比下面那轮 curl 细得多。下面那轮验证的是「真起 uvicorn 也能通」。
+        run: PYTHONPATH=. python tests/smoke_cold_start.py
+
+      - name: 全新实例起得来 + 关键端点可达
+        # 模拟别人 clone 下来什么都没配就启动：没有 data/、没有 .env、
+        # 没有代理池、没有接码 token。这条通了才算「任何人都能跑」。
+        env:
+          WB_DATA_DIR: /tmp/wb-smoke
+          WB_ADMIN_KEY: smoke-admin-key
+        run: |
+          set -eu
+          python -m uvicorn app.main:app --host 127.0.0.1 --port 9188 \
+            --log-level warning > /tmp/uvicorn.log 2>&1 &
+          pid=$!
+          trap 'kill $pid 2>/dev/null || true' EXIT
+
+          for i in $(seq 1 40); do
+            if curl -fsS --max-time 2 http://127.0.0.1:9188/api/health > /dev/null; then
+              break
+            fi
+            sleep 0.5
+          done
+
+          echo "── /api/health"
+          curl -fsS http://127.0.0.1:9188/api/health
+
+          echo "── 未登录访问 / 应 302 到 /login"
+          code=$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:9188/)
+          test "$code" = "302" || { echo "期望 302，实际 $code"; exit 1; }
+
+          echo "── /login 应 200"
+          curl -fsS -o /dev/null http://127.0.0.1:9188/login
+
+          echo "── 默认密码闸门：无凭据访问 /api/pool 应 403"
+          code=$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:9188/api/pool)
+          test "$code" = "403" || { echo "期望 403，实际 $code"; exit 1; }
+
+          echo "── 带 WB_ADMIN_KEY 应放行"
+          curl -fsS -o /dev/null -H "Authorization: Bearer smoke-admin-key" \
+            http://127.0.0.1:9188/api/pool
+
+          echo "── 默认出口表应为空（不含任何私有拓扑）"
+          curl -fsS -H "Authorization: Bearer smoke-admin-key" \
+            http://127.0.0.1:9188/api/proxy \
+            | python -c 'import json,sys; d=json.load(sys.stdin); assert d["exits"]==[], d["exits"]; print("  exits=[] OK")'
+
+          echo
+          echo "冒烟通过"
+
+      - name: 失败时打印服务日志
+        if: failure()
+        run: cat /tmp/uvicorn.log || true
+
+  docker:
+    name: 镜像构建
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: docker build
+        run: docker build -t wb-pool:ci .
+
+      - name: 容器起得来且 health 通
+        run: |
+          set -eu
+          docker run -d --name wb-ci -p 127.0.0.1:9188:9188 \
+            -e WB_ADMIN_KEY=ci-admin-key wb-pool:ci
+          for i in $(seq 1 40); do
+            if curl -fsS --max-time 2 http://127.0.0.1:9188/api/health > /dev/null; then
+              break
+            fi
+            sleep 0.5
+          done
+          curl -fsS http://127.0.0.1:9188/api/health
+          echo
+          docker rm -f wb-ci > /dev/null
