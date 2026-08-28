@@ -171,7 +171,7 @@ function renderAuth(a) {
   </div>`;
 }
 
-function openPasswordModal(onDone) {
+function openPasswordModal() {
   const html = `
     <h3>修改密码</h3>
     <p class="modal-msg">改完会立即生效，当前会话可能需要重新登录。</p>
@@ -205,10 +205,21 @@ function openPasswordModal(onDone) {
       if (a.length < 6) return showErr('新密码至少 6 位');
       btn.disabled = true;
       try {
-        await apiFetch('/api/auth/password', { method: 'POST', body: { old_password: old, new_password: a } });
+        // 两套键都发。这里原来只发 old_password/new_password，而有的部署后端
+        // 只读 old/new —— 后端读到空串，报的却是「新密码至少 6 位」，看着像
+        // 校验规则不对，完全指不到键名上（改密码功能因此一直是坏的）。
+        // 多余的键会被忽略，所以同时发能兼容两边。
+        const r = await apiFetch('/api/auth/password', {
+          method: 'POST',
+          body: { old: old, new: a, old_password: old, new_password: a },
+        });
         close();
-        toast('密码已修改', 'ok');
-        onDone?.();
+        // 改密成功后后端会作废该用户的所有 session。所以不能回头重载设置页
+        // （那会让每个 /api/* 都 401，页面变成一片错误卡片），直接去登录页。
+        toast('密码已修改，请用新密码登录', 'ok');
+        const to = (r && typeof r.redirect === 'string' && r.redirect.startsWith('/'))
+          ? r.redirect : '/login';
+        setTimeout(() => location.replace(to), 600);
       } catch (err) {
         showErr(err.message);
         btn.disabled = false;
@@ -391,8 +402,9 @@ function render(root) {
 
 function bind(root) {
   root.querySelector('[data-act="reload"]')?.addEventListener('click', () => boot(root));
+  // 改密成功后会跳登录页（session 已被后端作废），不需要回调重载本页
   root.querySelector('[data-act="passwd"]')?.addEventListener('click', () =>
-    openPasswordModal(() => boot(root)));
+    openPasswordModal());
 
   root.querySelector('[data-act="logout"]')?.addEventListener('click', async () => {
     if (!(await confirmDialog('退出登录', '确认退出当前会话？', { danger: false, okText: '退出' }))) return;
