@@ -62,3 +62,7 @@ restore_disabled.py
 # 被取代的产物：余额快照时间序列（本意是区分「真扣费」与「包到期」，
 # 现已由 get-user-request-usage 逐笔流水 + 包级到期感知直接解决），从未运行过
 scripts/balance_snapshot.py
+
+# 演示站构建产物。demo/build.py 从 web/ + demo/ 生成，CI 每次自己重跑，
+# 提交它只会制造「源码改了但 dist 忘了重建」的不一致。
+dist/

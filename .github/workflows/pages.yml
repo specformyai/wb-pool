@@ -1,0 +1,79 @@
+name: Demo Pages
+
+# 把 web/ 那套前端构建成纯静态演示站发到 GitHub Pages。
+#
+# 为什么要单开一个 workflow：Pages 部署需要 pages:write + id-token:write 权限，
+# 而 ci.yml 只需要读权限。混在一起等于给测试 job 也放开部署权限。
+#
+# 演示站没有后端（Pages 只托管静态文件），所有 /api/* 由 demo/mock.js 拦下来
+# 返回 demo/fixtures.json 里预先抓好的响应，写操作一律 403。
+
+on:
+  push:
+    branches: [master]
+    paths:
+      - 'web/**'
+      - 'demo/**'
+      - '.github/workflows/pages.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# 同一时间只允许一个部署跑，但不取消进行中的那个 ——
+# 取消一半的 Pages 部署会让站点停在中间状态。
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: 构建演示站
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: 构建 dist/
+        run: python demo/build.py
+
+      - name: 产物自检
+        run: |
+          set -eu
+          test -f dist/index.html
+          test -f dist/mock.js
+          test -f dist/fixtures.json
+          test -f dist/.nojekyll
+          # login.html 不该进演示站（演示站没有登录流程）
+          if [ -f dist/login.html ]; then
+            echo "::error::dist/login.html 不该存在"
+            exit 1
+          fi
+          # 绝对路径 /static/ 在 /<repo>/ 子路径下会 404
+          if grep -q '"/static/' dist/index.html; then
+            echo "::error::dist/index.html 仍有 /static/ 绝对路径"
+            exit 1
+          fi
+          echo "  dist 自检通过，共 $(find dist -type f | wc -l) 个文件"
+
+      - uses: actions/configure-pages@v5
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: dist
+
+  deploy:
+    name: 部署到 Pages
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4

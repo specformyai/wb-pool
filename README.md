@@ -1,9 +1,12 @@
 # wb-pool
 
 [![CI](https://github.com/specformyai/wb-pool/actions/workflows/ci.yml/badge.svg?branch=master)](https://github.com/specformyai/wb-pool/actions/workflows/ci.yml)
+[![Demo Pages](https://github.com/specformyai/wb-pool/actions/workflows/pages.yml/badge.svg?branch=master)](https://github.com/specformyai/wb-pool/actions/workflows/pages.yml)
 
 WorkBuddy / CodeBuddy 账号池反向代理。把账号的 token 池化，统一暴露成 OpenAI 与 Anthropic 兼容端点，
 带轮询调度、token 自动续期、余额与倍率看板、每日签到、历史对话还原，以及一个自带的 WebUI。
+
+**在线演示：<https://specformyai.github.io/wb-pool/>** —— 11 个页面都能点，数据全是虚构的，写操作已禁用。
 
 ## 能力
 
@@ -149,6 +152,26 @@ location / {
 
 不要直接把 9188 开到公网 —— 管理面板和账号 token 都在这个端口上。
 
+## 在线演示
+
+<https://specformyai.github.io/wb-pool/>
+
+GitHub Pages 只托管静态文件，跑不了后端。所以演示站是 `web/` 那套前端原封不动，
+外加一层 `demo/mock.js` 在模块加载前替换 `window.fetch`，把 `/api/*` 全接到
+`demo/fixtures.json` 上。前端代码一个字节都没为演示改过。
+
+fixtures 不是手写的，是起一个真后端实例（虚构账号 + 虚构流水）逐端点抓下来的 ——
+手写契约一旦字段名或嵌套形状写错，页面会「元素在但内容空」，那种问题极难归因。
+
+本地跑一遍：
+
+```bash
+python demo/build.py                    # 产出 dist/
+python -m http.server 8935 -d dist      # 打开 http://127.0.0.1:8935
+```
+
+演示站里写操作一律返回 403，账号、余额、手机号全是编的。
+
 ## 开发
 
 ```bash
@@ -176,19 +199,6 @@ python scripts/bump_static_version.py
 
 ES module 有独立于 HTTP 缓存的模块图缓存，`?v=<sha1>` 不变浏览器就一直用旧文件
 —— 你本地测得通，用户刷新一百次还是旧的。CI 会把「哈希过期」判成硬失败。
-
-### CI
-
-推到 `master` 和开 PR 都会跑（也可以在 Actions 页手动触发），四个 job：
-
-| job | 内容 |
-|---|---|
-| 离线测试 | `tests/test_*.py` 全套，假上游，不打网络 |
-| 前端语法与缓存版本 | 每个 `web/*.js` 过 `node --check`，跑 `tests/test_chat_utils.js`，并校验 importmap 里的 `?v=` 哈希是最新的 |
-| 冷启动冒烟 | 全新实例什么都没配也要能起来，真起 uvicorn 后打健康检查与 `/v1/models` |
-| 镜像构建 | `docker build` 出镜像并真跑起来验一次 |
-
-CI 里 `WB_PROXY_MODE=off`、`WB_UOOMSG_TOKEN` 留空、签到 cron 关掉，所以不会碰真实上游，也不会烧接码余额。
 
 ## 接入
 
