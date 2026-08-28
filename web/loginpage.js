@@ -17,15 +17,62 @@ const AUTH_STATE = '/api/auth/state';
 const AUTH_LOGIN = '/api/auth/login';
 const AUTH_PASSWORD = '/api/auth/password';
 
+/* 进登录页时地址栏可能挂着上一页的 hash 路由 —— 见下面 stripHash() 的说明。
+ * 它必须在任何 await 之前被读走并清掉，否则用户会先看到 /login#/overview。 */
+let carriedHash = '';
+
+/**
+ * 把继承来的 hash 从地址栏抹掉，但记下它当作登录后的落点。
+ *
+ * 为什么会有这个 hash：
+ *   访问 /#/overview 未登录 → 后端 302 到 /login。302 的 Location 头是干净的
+ *   `/login`（无 fragment），但按 RFC 7231 §7.1.2，客户端要把**原 URL 的
+ *   fragment 继承到重定向目标**，所有主流浏览器都这么做。于是地址栏成了
+ *   /login#/overview。
+ *
+ *   fragment 从不发给服务器，所以后端无论怎么写 302 都管不了这件事，
+ *   只能在这里由前端收拾。
+ *
+ * 用 history.replaceState 而不是改 location.hash：后者会新增一条历史记录，
+ * 用户点后退会回到带 hash 的 /login，白跳一次。
+ */
+function stripHash() {
+  // login.html 的 head 里有段内联脚本已经同步抹掉 hash 并把它存进
+  // sessionStorage（必须那么早，否则用户会看到一瞬间的 /login#/overview）。
+  // 这里优先取它存的值；下面那段是兜底：万一 HTML 没带那段脚本
+  // （老缓存、或别处复用这个模块），行为仍然正确。
+  try {
+    const saved = sessionStorage.getItem('wb:carriedHash');
+    if (saved) {
+      carriedHash = saved;
+      sessionStorage.removeItem('wb:carriedHash');
+    }
+  } catch (e) { /* 隐私模式下 sessionStorage 可能抛错，忽略 */ }
+
+  const h = location.hash || '';
+  if (!h) return;
+  carriedHash = carriedHash || h;
+  history.replaceState(null, '', location.pathname + location.search);
+}
+
 /** 登录成功后要去哪：支持 /login?next=/xxx，但只允许站内相对路径 */
 function nextTarget() {
   const raw = new URLSearchParams(location.search).get('next') || '/';
   // 只接受以单个 / 开头的路径。'//evil.com' 会被浏览器当协议相对 URL
   // 跳到外站，是个开放重定向漏洞，必须挡掉。
-  return /^\/(?!\/)/.test(raw) ? raw : '/';
+  const base = /^\/(?!\/)/.test(raw) ? raw : '/';
+  // 把进来时被抹掉的 hash 补回落点，用户仍回到他原本要去的那一页。
+  // 只认 #/xxx 形状，避免把 javascript: 之类的东西拼进 URL。
+  if (carriedHash && !base.includes('#') && /^#\/[A-Za-z0-9\-_/]*$/.test(carriedHash)) {
+    return base + carriedHash;
+  }
+  return base;
 }
 
 export async function mountLoginPage(root) {
+  // 第一件事就清地址栏：晚于 await 的话，那一瞬间用户已经看到 #/overview 了。
+  stripHash();
+
   let state = null;
   try {
     state = await apiFetch(AUTH_STATE);

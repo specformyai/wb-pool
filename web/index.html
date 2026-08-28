@@ -74,7 +74,11 @@
   // 这段是给「页面开着不动、session 过期」那种情况兜底：不做检查的话
   // 首屏每个 /api/* 都 401，用户只看到一堆报错卡片而不知道该去登录。
   const gotoLogin = () => {
-    const next = encodeURIComponent(location.pathname + location.search + location.hash);
+    // 不要把 location.hash 编进 next：那样地址栏会变成
+    // /login?next=%2F%23%2Foverview，hash 只是换了个形式照样显露出来。
+    // hash 路由改由 sessionStorage 传递，登录页负责取回当落点。
+    try { if (location.hash) sessionStorage.setItem('wb:carriedHash', location.hash); } catch (e) {}
+    const next = encodeURIComponent(location.pathname + location.search);
     location.replace('/login?next=' + next);
   };
 

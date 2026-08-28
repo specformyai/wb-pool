@@ -18,6 +18,23 @@
 <link rel="stylesheet" href="/static/shared.css?v=4a8191e8" />
 <link rel="stylesheet" href="/static/login.css?v=4d1291bd" />
 <script src="https://unpkg.com/lucide@0.469.0/dist/umd/lucide.min.js"></script>
+
+<!-- 抢在渲染前抹掉继承来的 hash 路由。
+     访问 /#/overview 未登录时后端 302 到 /login，Location 头是干净的
+     `/login`，但浏览器按 RFC 7231 §7.1.2 会把原 URL 的 fragment 继承过来，
+     地址栏就成了 /login#/overview —— 后端管不到 fragment（它从不发给服务器）。
+
+     这段必须内联在 head 里同步执行：loginpage.js 是 type="module"，天然
+     defer，等它跑起来用户已经看见那个 hash 了。落点由 loginpage.js 从
+     sessionStorage 取回，登录后仍回到原本要去的页面。 -->
+<script>
+(function () {
+  var h = location.hash || '';
+  if (!h) return;
+  try { sessionStorage.setItem('wb:carriedHash', h); } catch (e) {}
+  history.replaceState(null, '', location.pathname + location.search);
+})();
+</script>
 </head>
 <body class="login-mode">
 
@@ -28,7 +45,7 @@
 {
   "imports": {
     "@/shared.js":   "/static/shared.js?v=d14d6557",
-    "@/loginpage.js": "/static/loginpage.js?v=65fe01a3"
+    "@/loginpage.js": "/static/loginpage.js?v=f81a073f"
   }
 }
 </script>
