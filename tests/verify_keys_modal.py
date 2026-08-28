@@ -321,32 +321,54 @@ try:
                       if (c) c.click(); return true; })()""")
     time.sleep(0.6)
 
-    print("\n=== 6) pages.js 里第 4 处同类调用（源码层核对）===")
-    # 为什么不在浏览器里点：router.js 的 ROUTES 把 #/rates 指向 @/rates.js，
-    # 而 openMeasure() 在 pages.js 里。pages.js 的 mountRates/openMeasure 是
-    # 前端模块化时留下的死代码，任何路由都到不了 —— 上一轮在 #/rates 页面找
-    # '.page-rates [data-act="measure"]' 自然找不到（那页渲染的是 rates.js 的
-    # .page-h + 读取缓存/同步上游），报 3 个 FAIL 全是测了不可达路径。
-    # 它仍然要修（签名错就是错，将来若被接回路由会立刻炸），所以改成源码断言。
+    print("\n=== 6) 源码层核对：3 处活调用 + 死代码已清除 ===")
+    # 原本这里核对的是 4 处。第 4 处（倍率实测弹窗 openMeasure）连同 pages.js
+    # 里整个 mountRates/loadRates/renderRates/resetRates 块一起删掉了 ——
+    # router.js 的 ROUTES 把 #/rates 指向 @/rates.js，pages.js 那份是前端
+    # 模块化时留下的孤儿，任何路由都到不了。所以现在只剩 keys 页那 3 处是活的：
+    # openCreateKey / openEditKey / showKeyReveal。
     src = pathlib.Path(__file__).resolve().parents[1] / "web" / "pages.js"
     js = src.read_text(encoding="utf-8")
     check("openModal(keysRoot" not in js and "openModal(ratesRoot" not in js,
           "pages.js 已无 openModal(root, ...) 三参调用",
           "仍有 root 作首参")
-    check(js.count("{ box: back, close } = openModal(") == 4,
-          "4 处都改成解构 box（openModal 不返回 back）",
-          js.count("{ box: back, close } = openModal("))
-    check(js.count("scope: 'page-keys'") == 3 and js.count("scope: 'page-rates'") == 1,
-          "4 处都带 scope（否则弹窗没样式）",
-          f"keys={js.count(chr(39)+'page-keys'+chr(39))} rates={js.count(chr(39)+'page-rates'+chr(39))}")
-    check(js.count("onClose:") == 4,
-          "4 处都带 onClose（否则弹窗计数器不归零、轮询永久停摆）",
-          js.count("onClose:"))
-    # rates.js 是真正挂在 #/rates 上的模块，确认它没有同类问题
+    check(js.count("{ box: back, close } = openModal(") == 3,
+          "3 处活调用都解构 box（openModal 不返回 back）",
+          str(js.count("{ box: back, close } = openModal(")))
+    check(js.count("scope: 'page-keys'") == 3,
+          "3 处都带 scope=page-keys（否则弹窗没样式）",
+          str(js.count("scope: 'page-keys'")))
+    check(js.count("scope: 'page-rates'") == 0,
+          "page-rates scope 已随死代码移除",
+          str(js.count("scope: 'page-rates'")))
+    check(js.count("onClose:") == 3,
+          "3 处都带 onClose（否则弹窗计数器不归零、轮询永久停摆）",
+          str(js.count("onClose:")))
+    # 三个活落点的函数必须还在（名字从 pages.js 实读，不凭记忆）
+    for fn in ("openCreateKey", "openEditKey", "showKeyReveal"):
+        check(f"function {fn}(" in js, f"{fn} 仍在", "函数不见了")
+    # 死代码符号必须一个不剩
+    dead = [s for s in ("mountRates", "unmountRates", "openMeasure", "runMeasure",
+                        "loadRates", "renderRates", "resetRates", "rateRowHtml",
+                        "stopMeasureTimer", "ratesRoot", "ratesTimer",
+                        "measureTimer", "ratesModal", "ratesState")
+            if s in js]
+    check(not dead, "pages.js 里 rates 死代码已清零", str(dead))
+    check(".pr-" not in js, "pages.js 里 .pr-* class 已清零", "仍有 .pr-")
+
+    # rates.js / rates.css 是真正的倍率页，必须完好
     rjs = (src.parent / "rates.js").read_text(encoding="utf-8")
     check("openModal" not in rjs,
           "rates.js（真正的倍率页）不用 openModal，无同类风险",
           "rates.js 里出现了 openModal")
+    check("export function mountRates" in rjs,
+          "rates.js 的 mountRates 仍在（真倍率页未受影响）",
+          "rates.js 的入口不见了")
+    pcss = (src.parent / "pages.css").read_text(encoding="utf-8")
+    check(".pr-" not in pcss, "pages.css 里 .pr-* 规则已清零", "仍有 .pr-")
+    # keys 页弹窗样式是复合选择器 .page-keys .x-*，删 rates 块不能伤到它
+    check(".page-keys .x-box" in pcss and ".page-keys .x-in" in pcss,
+          "API Key 页弹窗样式保留", "复合选择器被误删")
 
     print(f"\n=== 结果: {_pass} PASS / {_fail} FAIL ===")
     rc = 0 if _fail == 0 else 1

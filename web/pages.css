@@ -61,38 +61,6 @@
 .page-keys .pk-sw.on::after{transform:translateX(16px)}
 @media(max-width:768px){.page-keys .pk-stats{grid-template-columns:repeat(2,1fr)}.page-keys .pk-grid{grid-template-columns:1fr}}
 
-/* ===== 页面二：倍率表 ===== */
-.page-rates .pr-top{display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap;margin-bottom:14px}
-.page-rates .pr-top h2{margin:0;font-size:18px;display:flex;align-items:center;gap:8px}
-.page-rates .pr-top h2 i{width:20px;height:20px;color:var(--acc)}
-.page-rates .pr-acts{display:flex;gap:8px}
-.page-rates .pr-note{display:flex;gap:8px;align-items:flex-start;font-size:12px;color:var(--fg-2);background:var(--card);border:1px solid var(--line);border-left:3px solid var(--acc-2);border-radius:var(--radius);padding:10px 12px;margin-bottom:14px;line-height:1.6}
-.page-rates .pr-note[hidden]{display:none}
-.page-rates .pr-note i{width:14px;height:14px;flex-shrink:0;margin-top:2px;color:var(--acc-2)}
-.page-rates .pr-wrap{overflow-x:auto;background:var(--card);border:1px solid var(--line);border-radius:var(--radius)}
-.page-rates table{width:100%;border-collapse:collapse;font-size:13px;min-width:780px}
-.page-rates th{padding:11px 14px;text-align:left;font-size:12px;color:var(--fg-3);font-weight:500;border-bottom:1px solid var(--line);white-space:nowrap;user-select:none}
-.page-rates th.sortable{cursor:pointer}
-.page-rates th.sortable:hover{color:var(--fg)}
-.page-rates th .arw{color:var(--acc);margin-left:2px}
-.page-rates td{padding:12px 14px;border-bottom:1px solid var(--line);vertical-align:middle}
-.page-rates tr:last-child td{border-bottom:none}
-.page-rates tr.lack td{opacity:.45}
-.page-rates .pr-model{font-family:monospace;font-weight:600;display:flex;align-items:center;gap:8px;flex-wrap:wrap}
-.page-rates .pr-badge{font-size:10px;padding:2px 7px;border-radius:99px;white-space:nowrap;font-family:inherit;font-weight:400}
-.page-rates .pr-badge.base{background:var(--bg);color:var(--acc-2);border:1px solid var(--line-2)}
-.page-rates .pr-badge.thk{background:var(--bg);color:var(--warn);border:1px solid var(--line-2)}
-.page-rates .pr-mult{display:flex;align-items:center;gap:10px}
-.page-rates .pr-mult b{min-width:52px;font-variant-numeric:tabular-nums}
-.page-rates .pr-bar{height:8px;border-radius:99px;background:var(--bg);width:110px;position:relative;overflow:hidden;flex-shrink:0}
-.page-rates .pr-bar i{position:absolute;top:0;bottom:0;left:0;border-radius:99px;background:linear-gradient(90deg,var(--acc),var(--acc-2))}
-.page-rates .pr-lack{color:var(--fg-3);font-size:12px}
-.page-rates .pr-prog{display:flex;align-items:center;gap:10px;margin-top:6px;font-size:12px;color:var(--fg-2)}
-.page-rates .pr-prog[hidden]{display:none}
-.page-rates .pr-spin{width:16px;height:16px;border:2px solid var(--line-2);border-top-color:var(--acc);border-radius:50%;animation:pr-rot .8s linear infinite;flex-shrink:0}
-@keyframes pr-rot{to{transform:rotate(360deg)}}
-@media(max-width:768px){.page-rates .pr-top{flex-direction:column;align-items:stretch}.page-rates .pr-acts{justify-content:flex-end}}
-
 /* ==================== calls-and-proxy ==================== */
 /* ====== 调用监控 + 代理池（所有选择器均以页面根 class 限定） ====== */
 .page-calls,.page-proxy{padding:20px;color:var(--fg);font-size:13px}
