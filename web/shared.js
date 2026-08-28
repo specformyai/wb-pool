@@ -155,17 +155,33 @@ export function confirmDialog(title, msg, { danger = true, okText = '确认' } =
   });
 }
 
-/** 通用弹窗：传入 innerHTML，返回 { box, close }，调用方自己绑事件 */
-export function openModal(html, { size = '' } = {}) {
-  const wrap = el('div', { class: 'modal' });
+/** 通用弹窗：传入 innerHTML，返回 { box, wrap, close }，调用方自己绑事件。
+ *
+ * options
+ *   size    'sm' | 'lg'，加到 .modal-box 上
+ *   scope   额外加到最外层 .modal 上的 class。页面级样式（`.page-keys .x-btn`
+ *           那一整批）是 scoped 的，而弹窗挂在 document.body 下、不在页面根
+ *           里面，不给 scope 就会渲染成一个完全没样式的裸弹窗。
+ *   onClose 关闭后回调。调用方常用它把「弹窗开着就暂停轮询」的计数器减回去，
+ *           所以 close() 必须幂等：否则先点遮罩、再按 ESC 会减两次，计数器
+ *           变成 -1，而 `if (!n)` 对 -1 恒假 —— 轮询会永久停摆。
+ */
+export function openModal(html, { size = '', scope = '', onClose = null } = {}) {
+  const wrap = el('div', { class: 'modal' + (scope ? ` ${scope}` : '') });
   wrap.innerHTML = `<div class="modal-mask"></div><div class="modal-box ${size}">${html}</div>`;
-  const close = () => wrap.remove();
+  let closed = false;
+  const close = () => {
+    if (closed) return;          // 幂等：遮罩、ESC、按钮可能都指向它
+    closed = true;
+    document.removeEventListener('keydown', onKey);
+    wrap.remove();
+    if (onClose) onClose();
+  };
+  function onKey(e) { if (e.key === 'Escape') close(); }
   wrap.addEventListener('click', (e) => {
     if (e.target.classList.contains('modal-mask') || e.target.closest('[data-close]')) close();
   });
-  document.addEventListener('keydown', function esc(e) {
-    if (e.key === 'Escape') { document.removeEventListener('keydown', esc); close(); }
-  });
+  document.addEventListener('keydown', onKey);
   document.body.appendChild(wrap);
   refreshIcons();
   return { box: wrap.querySelector('.modal-box'), wrap, close };

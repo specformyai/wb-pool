@@ -155,7 +155,7 @@ function bindKeyCard(listEl, k) {
 
 function openCreateKey() {
   keysModal++;
-  const { back, close } = openModal(keysRoot, `
+  const { box: back, close } = openModal(`
     <h3><i data-lucide="key-round"></i>新建 API Key</h3>
     <div class="x-sub">创建后完整 Key 只显示一次</div>
     <div class="x-field"><label>名称</label><input class="x-in" name="name" placeholder="例如：生产环境-后端服务" maxlength="64"></div>
@@ -163,7 +163,7 @@ function openCreateKey() {
     <div class="x-acts">
       <button class="x-btn" data-act="cancel">取消</button>
       <button class="x-btn pri" data-act="ok"><i data-lucide="plus"></i>创建</button>
-    </div>`, () => keysModal--);
+    </div>`, { scope: 'page-keys', onClose: () => keysModal-- });
   back.querySelector('[data-act="cancel"]').addEventListener('click', close);
   back.querySelector('[data-act="ok"]').addEventListener('click', async (e) => {
     const name = back.querySelector('[name="name"]').value.trim();
@@ -181,7 +181,7 @@ function openCreateKey() {
 function openEditKey(k) {
   const isEnv = k.source === 'env';
   keysModal++;
-  const { back, close } = openModal(keysRoot, `
+  const { box: back, close } = openModal(`
     <h3><i data-lucide="pencil"></i>编辑 Key</h3>
     <div class="x-sub">${esc(k.masked)}</div>
     <div class="x-field"><label>名称</label>
@@ -191,7 +191,7 @@ function openEditKey(k) {
     <div class="x-acts">
       <button class="x-btn" data-act="cancel">取消</button>
       <button class="x-btn pri" data-act="ok">保存</button>
-    </div>`, () => keysModal--);
+    </div>`, { scope: 'page-keys', onClose: () => keysModal-- });
   back.querySelector('[data-act="cancel"]').addEventListener('click', close);
   back.querySelector('[data-act="ok"]').addEventListener('click', async (e) => {
     const body = { note: back.querySelector('[name="note"]').value.trim() };
@@ -211,7 +211,7 @@ function openEditKey(k) {
 // 新建/轮换共用的一次性明文弹窗
 function showKeyReveal(title, key) {
   keysModal++;
-  const { back, close } = openModal(keysRoot, `
+  const { box: back, close } = openModal(`
     <h3><i data-lucide="shield-check"></i>${esc(title)}</h3>
     <div class="x-sub">请立即复制并妥善保存</div>
     <div class="x-keyreveal">${esc(key)}</div>
@@ -219,7 +219,7 @@ function showKeyReveal(title, key) {
       <button class="x-btn pri" data-act="copy"><i data-lucide="copy"></i>复制</button>
     </div>
     <div class="x-once"><i data-lucide="shield-alert"></i><span>完整 Key 只显示这一次，关闭后无法再次查看。</span></div>
-    <div class="x-acts"><button class="x-btn" data-act="done">我已保存，关闭</button></div>`, () => keysModal--);
+    <div class="x-acts"><button class="x-btn" data-act="done">我已保存，关闭</button></div>`, { scope: 'page-keys', onClose: () => keysModal-- });
   back.querySelector('[data-act="copy"]').addEventListener('click', async () => {
     const ok = await copyText(key);
     toast(ok ? '已复制到剪贴板' : '复制失败，请手动全选复制', ok ? 'ok' : 'err');
@@ -361,7 +361,7 @@ function openMeasure() {
   ratesModal++;
   const models = [...new Set(ratesState.rows.map((r) => r.model))];
   // datalist：已有模型直接选，也允许输入表里还没出现的新模型 id
-  const { back, close } = openModal(ratesRoot, `
+  const { box: back, close } = openModal(`
     <h3><i data-lucide="flask-conical"></i>实测倍率</h3>
     <div class="x-sub">向目标模型发起数轮真实请求，按 usage.credit 反推倍率</div>
     <div class="x-field"><label>模型</label>
@@ -373,7 +373,8 @@ function openMeasure() {
     <div class="x-acts">
       <button class="x-btn" data-act="cancel">取消</button>
       <button class="x-btn pri" data-act="go"><i data-lucide="play"></i>开始实测</button>
-    </div>`, () => { ratesModal--; stopMeasureTimer(); });
+    </div>`, { scope: 'page-rates',
+                onClose: () => { ratesModal--; stopMeasureTimer(); } });
   back.querySelector('[data-act="cancel"]').addEventListener('click', close);
   back.querySelector('[data-act="go"]').addEventListener('click', () => runMeasure(back, close));
 }
