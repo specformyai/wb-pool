@@ -1822,7 +1822,8 @@ def _reschedule_jobs() -> None:
     得到六个作业（实测）。所以这里先显式清一遍，让函数在任何状态下都幂等，
     调用方不必知道 APScheduler 的这个内部差异。
     """
-    for jid in ("sync_models", "checkin", "balance"):
+    # calls_prune 是后加的作业，也要一起清，否则未 start 时重排会重复注册
+    for jid in ("calls_prune", "sync_models", "checkin", "balance"):
         try:
             scheduler.remove_job(jid)
         except Exception:  # noqa: BLE001 —— 不存在就算了，这里只求幂等

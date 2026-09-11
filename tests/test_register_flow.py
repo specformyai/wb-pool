@@ -330,6 +330,12 @@ class RegisterFlowTest(unittest.TestCase):
     def test_18_phone_normalisation(self):
         for raw in ("+8613900000006", "8613900000006", "13900000006", "139 0000 0006"):
             reset_state()
+            # 同号并发守卫会拦住第二次发码（四种写法归一到同一个号，正是要验的）。
+            # 清掉上一轮的存活会话，让每一轮都能真正发码。
+            with self.registrar._lock:
+                for s in list(self.registrar._sessions.values()):
+                    s.close()
+                self.registrar._sessions.clear()
             r = self.registrar.start(raw)
             self.assertTrue(r.get("ok"), f"{raw}: {r}")
             self.assertEqual(STATE["sms_sent"][-1], "+8613900000006", f"{raw} 归一化错")

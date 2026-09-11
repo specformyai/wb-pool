@@ -84,12 +84,12 @@ print("\n=== 8) _reschedule_jobs 可反复调用 ===")
 check(callable(M._reschedule_jobs), "函数存在")
 M._reschedule_jobs(); M._reschedule_jobs(); M._reschedule_jobs()
 ids = sorted(j.id for j in M.scheduler.get_jobs())
-check(ids == ["balance", "checkin", "sync_models"],
+check(ids == ["balance", "calls_prune", "checkin", "sync_models"],
       "未 start 时反复重排也不重复（APScheduler pending 队列不查重）", ids)
 M.scheduler.start()
 M._reschedule_jobs(); M._reschedule_jobs()
 ids = sorted(j.id for j in M.scheduler.get_jobs())
-check(ids == ["balance", "checkin", "sync_models"],
+check(ids == ["balance", "calls_prune", "checkin", "sync_models"],
       "start 之后重排同样幂等", ids)
 # 改 cron 应该真的换掉 trigger，而不是留着旧的
 M.settings.set_many({"checkin_cron": "30 3 * * *"})

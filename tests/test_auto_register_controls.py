@@ -54,7 +54,9 @@ class AutoRegisterControlsTest(unittest.TestCase):
     def test_blocked_task_is_marked_failed_by_timer(self) -> None:
         released: list[str] = []
 
-        def slow_phone(_token: str) -> dict:
+        # 真 get_phone 现在带 exclude=（号码去重），stub 签名必须跟上，
+        # 否则 TypeError 被 _run 吞掉，任务在取号阶段就以另一种理由失败。
+        def slow_phone(_token: str, exclude: set[str] | None = None) -> dict:
             time.sleep(0.16)
             return {"ok": True, "phone": "13800138000"}
 
@@ -81,7 +83,7 @@ class AutoRegisterControlsTest(unittest.TestCase):
             ar.TASK_TIMEOUT = original_timeout
 
     def test_late_phone_failure_cannot_overwrite_timeout(self) -> None:
-        def slow_failed_phone(_token: str) -> dict:
+        def slow_failed_phone(_token: str, exclude: set[str] | None = None) -> dict:
             time.sleep(0.16)
             return {"ok": False, "error": "迟到的取号错误"}
 
