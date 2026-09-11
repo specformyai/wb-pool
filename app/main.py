@@ -31,6 +31,7 @@ from . import invite as invite_mod
 from . import uoomsg as uum
 from .accounting import Ledger
 from .apikeys import KeyStore
+from .calllog import RANGES as CALL_RANGES
 from .calllog import CallLog
 from . import pool as pool_mod
 from .pool import Account, AccountPool, classify_error
@@ -102,7 +103,11 @@ pool = AccountPool(ACCOUNTS_FILE)
 ledger = Ledger(DATA_DIR / "ledger.json")
 keystore = KeyStore(APIKEYS_FILE, env_key=API_KEY)
 webauth = WebAuth(WEBAUTH_FILE)
-calllog = CallLog(CALLS_FILE)
+# 开关与保留策略走 settings，用 getter 注入而不是传值 ——
+# 面板上改完必须立刻生效，不能要求重启（settings 层的既定约定）。
+calllog = CallLog(CALLS_FILE,
+                  enabled_getter=lambda: settings.get("calls_log_enabled"),
+                  retention_getter=lambda: settings.get("calls_retention_days"))
 pm = ProxyManager(mode=settings.get("proxy_mode"),
                   host=settings.get("proxy_host"),
                   fixed_url=settings.get("proxy_url"),
@@ -220,6 +225,16 @@ def require_admin(authorization: str | None = Header(None),
     raise HTTPException(401, "未登录")
 
 
+def _sse_data(obj: Any) -> str:
+    """把对象编码成一条 SSE data 行（含结尾空行）。
+
+    单独抽出来是因为 data 里如果有换行，SSE 协议要求每行都带 data: 前缀，
+    直接 json.dumps 再拼一次 "data: " 在紧凑输出下能用、但换 indent 就坏。
+    """
+    line = json.dumps(obj, ensure_ascii=False, separators=(",", ":"))
+    return "data: " + line + "\n\n"
+
+
 def _key_of(request: Request) -> dict[str, Any]:
     return getattr(request.state, "wb_key", None) or {"id": "", "name": ""}
 
@@ -228,11 +243,15 @@ def _log_call(request: Request, *, model: str, ok: bool, endpoint: str,
               t0: float, tokens: int = 0, credits: float = 0.0,
               account: str = "", code: Any = None, error: str = "",
               stream: bool = False, t_first: float = 0.0,
-              out_tokens: int = 0) -> None:
+              in_tokens: int = 0, out_tokens: int = 0) -> None:
     """一次上游调用落一行 calls.jsonl，并把用量记到对应的 API key 上。
 
     t_first  = 收到上游首包的时刻（用来算首字延迟）
-    out_tokens = 输出 token 数（用来算 t/s，只统计首包之后的生成阶段）
+    in_tokens  = 上行 token 数（prompt_tokens）
+    out_tokens = 下行 token 数（completion_tokens，也用来算 t/s）
+
+    上下行分开记而不是只记 total：两者单价与优化手段完全不同 ——
+    上行大是上下文/系统提示词堆积，下行大是模型话多，混成一个数看不出是哪种。
     """
     k = _key_of(request)
     now = time.time()
@@ -242,7 +261,9 @@ def _log_call(request: Request, *, model: str, ok: bool, endpoint: str,
     try:
         calllog.record(model=model, ok=ok, endpoint=endpoint,
                        ms=int((now - t0) * 1000), ttft_ms=ttft, tps=tps,
-                       tokens=tokens, credits=credits, account=account,
+                       tokens=tokens, in_tokens=in_tokens,
+                       out_tokens=out_tokens,
+                       credits=credits, account=account,
                        key_id=k.get("id", ""), key_name=k.get("name", ""),
                        code=code, error=error, stream=stream)
     except Exception:  # noqa: BLE001
@@ -428,6 +449,7 @@ async def chat_completions(request: Request) -> Any:
                     _log_call(request, model=model, ok=True, endpoint="chat", t0=t0,
                               tokens=tk, credits=credit, account=acc.masked(), stream=True,
                               t_first=t_first,
+                              in_tokens=(usage or {}).get("prompt_tokens", 0),
                               out_tokens=(usage or {}).get("completion_tokens", 0), code=200)
                 except Exception as exc:  # noqa: BLE001
                     pool.release(acc, error=str(exc)[:200])
@@ -457,7 +479,9 @@ async def chat_completions(request: Request) -> Any:
         pool.release(acc, tokens=tk, credits=credit)
         _log_call(request, model=model, ok=True, endpoint="chat", t0=t0,
                   tokens=tk, credits=credit, account=acc.masked(),
-                  t_first=t_first, out_tokens=(usage or {}).get("completion_tokens", 0), code=200)
+                  t_first=t_first,
+                  in_tokens=(usage or {}).get("prompt_tokens", 0),
+                  out_tokens=(usage or {}).get("completion_tokens", 0), code=200)
         msg: dict[str, Any] = {"role": "assistant", "content": content}
         if reasoning:
             msg["reasoning_content"] = reasoning
@@ -867,6 +891,7 @@ async def anthropic_messages(request: Request) -> Any:
                 _log_call(request, model=model, ok=True, endpoint="messages", t0=t0,
                           tokens=total_tokens, credits=credit,
                           account=acc.masked(), stream=True, t_first=t_first,
+                          in_tokens=(usage or {}).get("prompt_tokens", 0),
                           out_tokens=(usage or {}).get("completion_tokens", 0), code=200)
                 logged = True
                 yield _anthropic_event({
@@ -939,6 +964,7 @@ async def anthropic_messages(request: Request) -> Any:
     _log_call(request, model=model, ok=True, endpoint="messages", t0=t0,
               tokens=total_tokens, credits=credit,
               account=acc.masked(), t_first=t_first,
+              in_tokens=(usage or {}).get("prompt_tokens", 0),
               out_tokens=(usage or {}).get("completion_tokens", 0), code=200)
     return {
         "id": mid, "type": "message", "role": "assistant", "model": model,
@@ -1117,6 +1143,143 @@ def api_calls_recent(limit: int = 80) -> dict[str, Any]:
 def api_calls_reset() -> dict[str, Any]:
     calllog.reset()
     return {"ok": True}
+
+
+@app.get("/api/calls", dependencies=[Depends(require_admin)])
+def api_calls_page(range: str = "24h", page: int = 1, per_page: int = 15,
+                   model: str = "", ok: str = "") -> dict[str, Any]:
+    """分页查询调用日志。
+
+    分页与筛选都在服务端做：前端一页只要 15 条，把两万行推过去纯属浪费带宽。
+    ok 用字符串而不是 bool：FastAPI 对 bool 查询参数缺省时会当 False，
+    传空串才能表达「不筛选」（传 bool=None 在 query 里区分不出「没传」和「传了false」）。
+    """
+    flag: bool | None = None
+    s = (ok or "").strip().lower()
+    if s in ("1", "true", "ok", "yes"):
+        flag = True
+    elif s in ("0", "false", "fail", "no"):
+        flag = False
+    return calllog.query(range_key=range, page=page, per_page=per_page,
+                         model=(model or "").strip(), ok=flag)
+
+
+@app.get("/api/calls/ranges", dependencies=[Depends(require_admin)])
+def api_calls_ranges() -> dict[str, Any]:
+    """时间分组选项由后端给，前端不自己抄一份 —— 抄一份就会和后端漂移。"""
+    return {"ranges": [{"key": k, "label": v} for k, v in CALL_RANGES.items()],
+            "default": "24h", "per_page": 15}
+
+
+@app.get("/api/calls/config", dependencies=[Depends(require_admin)])
+def api_calls_config_get() -> dict[str, Any]:
+    """调用日志的开关与保留策略。
+
+    单独开一个端点而不是让前端直接打通用的 /api/settings：
+    这两项是「调用监控」页自己的东西，前端在一个页面里就能读写完整状态
+    （含 rows/bytes 这类文件概况），不用先拉一次全量配置再挑字段。
+    """
+    st = calllog.stats()
+    return {
+        "enabled": bool(st["enabled"]),
+        "retention_days": int(st["retention_days"]),
+        "enabled_source": settings.source_of("calls_log_enabled"),
+        "retention_source": settings.source_of("calls_retention_days"),
+        "rows": st["rows"], "bytes": st["bytes"],
+        "oldest_ts": st["oldest_ts"], "newest_ts": st["newest_ts"],
+        "max_lines": st["max_lines"],
+    }
+
+
+@app.post("/api/calls/config", dependencies=[Depends(require_admin)])
+async def api_calls_config_set(request: Request) -> dict[str, Any]:
+    """写开关 / 保留天数。retention_days=0 表示永不删除。"""
+    try:
+        body = await request.json()
+    except Exception:  # noqa: BLE001
+        body = {}
+    upd: dict[str, Any] = {}
+    if "enabled" in body:
+        upd["calls_log_enabled"] = body["enabled"]
+    if "retention_days" in body:
+        upd["calls_retention_days"] = body["retention_days"]
+    if not upd:
+        raise HTTPException(400, "没有可写入的字段")
+    try:
+        settings.set_many(upd)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    return {"ok": True, **api_calls_config_get()}
+
+
+@app.get("/api/calls/stats", dependencies=[Depends(require_admin)])
+def api_calls_stats() -> dict[str, Any]:
+    st = calllog.stats()
+    st["retention_source"] = settings.source_of("calls_retention_days")
+    st["enabled_source"] = settings.source_of("calls_log_enabled")
+    return st
+
+
+@app.post("/api/calls/prune", dependencies=[Depends(require_admin)])
+async def api_calls_prune(request: Request) -> dict[str, Any]:
+    """按保留策略清理。body 里可给 days 覆盖一次（不改配置）。"""
+    body: dict[str, Any] = {}
+    try:
+        body = await request.json()
+    except Exception:  # noqa: BLE001 —— 没 body 就按配置走
+        body = {}
+    days = body.get("days")
+    res = calllog.prune(None if days is None else int(days))
+    return {"ok": True, **res}
+
+
+@app.get("/api/calls/stream")
+async def api_calls_stream(request: Request,
+                           wb_session: str | None = Cookie(None, alias=COOKIE_NAME),
+                           authorization: str | None = Header(None),
+                           x_api_key: str | None = Header(None, alias="x-api-key"),
+                           range: str = "24h", page: int = 1,
+                           per_page: int = 15) -> StreamingResponse:
+    """SSE：有新调用才推，没有就只发心跳注释。
+
+    为什么不用 Depends(require_admin)：EventSource 不能带自定义头，
+    但**会带 cookie**，所以这里手动做同一套校验（session 优先，其次 ADMIN_KEY）。
+    直接挂 Depends 也能过（cookie 是它的第一优先级），显式写出来是为了让
+    「浏览器只能靠 cookie 进来」这件事在代码里可见。
+
+    推送靠 calllog.version()：每次 record/prune/reset 都 +1，
+    版本没变就什么都不发 —— 这是「省流量」的关键，客户端不再每 15s 全量拉一次。
+    """
+    s = webauth.session(wb_session or "")
+    if not s and not (ADMIN_KEY and _extract_key(authorization, x_api_key) == ADMIN_KEY):
+        raise HTTPException(401, "未登录")
+
+    async def gen():
+        last_ver = -1
+        idle = 0
+        # 30 分钟后主动断开，让浏览器自己重连（EventSource 会自动重连）。
+        # 长连接挂太久会被中间代理静默掐断，反而变成「界面不再更新」。
+        while idle < 1800:
+            if await request.is_disconnected():
+                return
+            ver = calllog.version
+            if ver != last_ver:
+                last_ver = ver
+                payload = calllog.query(range_key=range, page=page,
+                                        per_page=per_page)
+                yield "event: calls\n" + _sse_data(payload)
+                idle = 0
+            else:
+                # 注释行做心跳：不触发前端 onmessage，只防连接被判死
+                yield ": ping\n\n"
+                idle += 1
+            await asyncio.sleep(1.0)
+        yield "event: bye\n" + _sse_data({"reason": "idle-timeout"})
+
+    return StreamingResponse(gen(), media_type="text/event-stream",
+                             headers={"Cache-Control": "no-cache",
+                                      "X-Accel-Buffering": "no",
+                                      "Connection": "keep-alive"})
 
 
 @app.get("/api/pool", dependencies=[Depends(require_admin)])
@@ -1622,6 +1785,16 @@ def _job_checkin() -> None:
         pass
 
 
+def _job_calls_prune() -> None:
+    """按保留策略清理调用日志。retention=0（永不删除）时 prune 内部直接跳过。"""
+    try:
+        res = calllog.prune()
+        if res.get("removed"):
+            print(f"[calls] 清理过期日志 {res['removed']} 条（保留 {res['days']} 天）")
+    except Exception as exc:  # noqa: BLE001
+        print(f"[calls] 清理失败: {exc}")
+
+
 def _job_balance() -> None:
     try:
         pool.refresh_balances(proxy=pm.pick())
@@ -1654,6 +1827,8 @@ def _reschedule_jobs() -> None:
             scheduler.remove_job(jid)
         except Exception:  # noqa: BLE001 —— 不存在就算了，这里只求幂等
             pass
+    scheduler.add_job(_job_calls_prune, "interval", hours=1,
+                      id="calls_prune", replace_existing=True)
     scheduler.add_job(_job_sync_models, "interval", hours=6,
                       id="sync_models", name="模型清单刷新", replace_existing=True)
     cron = str(settings.get("checkin_cron") or "").split()

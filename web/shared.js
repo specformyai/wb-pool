@@ -105,6 +105,26 @@ export function fmtTime(ts) {
   return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
 }
 
+/** 秒级时间戳 → 具体时间（24 小时制）。
+ *
+ * 与 fmtTime 的分工：fmtTime 给「多久以前」，适合概览卡片；
+ * 这个给「几点几分几秒」，适合日志表格 —— 排查问题时要的是能和别处
+ * 日志对齐的确切时刻，「3 分钟前」对不上任何东西。
+ * 用 padStart 手拼而不是 toLocaleString：后者在不同 locale 下会
+ * 冒出 AM/PM 或「上午」，24 小时制是硬要求。
+ */
+export function fmtClock(ts, withDate = true) {
+  if (!ts) return '—';
+  const n = Number(ts);
+  if (!Number.isFinite(n)) return '—';
+  const d = new Date((n > 1e12 ? n : n * 1000));
+  if (Number.isNaN(d.getTime())) return '—';
+  const p = (x) => String(x).padStart(2, '0');
+  const clock = `${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
+  if (!withDate) return clock;
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${clock}`;
+}
+
 export function fmtDur(ms) {
   if (ms == null || Number.isNaN(Number(ms))) return '—';
   const v = Number(ms);

@@ -302,3 +302,42 @@
 .pdel:hover{color:var(--bad);background:rgba(239,68,68,.12)}
 /* 触屏没有 hover，删除按钮必须常驻可见 */
 @media (hover:none){.pdel{opacity:.7}}
+
+/* ---------- 调用监控：推送状态 / 分页 / 上下行 token / 日志设置 ---------- */
+.page-calls .cl-live{display:inline-flex;align-items:center;gap:6px;font-size:12px;color:var(--fg-3);padding:5px 10px;border:1px solid var(--line);border-radius:999px}
+.page-calls .cl-live i{width:13px;height:13px}
+.page-calls .cl-live.on{color:var(--ok);border-color:color-mix(in srgb,var(--ok) 45%,transparent)}
+.page-calls .cl-live.on i{animation:clPulse 1.8s ease-in-out infinite}
+.page-calls .cl-live.off{color:var(--warn);border-color:color-mix(in srgb,var(--warn) 45%,transparent)}
+@keyframes clPulse{0%,100%{opacity:1}50%{opacity:.35}}
+@media (prefers-reduced-motion:reduce){.page-calls .cl-live.on i{animation:none}}
+
+.page-calls table th.tr,.page-calls table td.tr{text-align:right}
+.page-calls table td.mono{font-variant-numeric:tabular-nums;font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+.page-calls table td.nowrap{white-space:nowrap}
+.page-calls .mmeta .tio{display:inline-flex;align-items:center;gap:3px}
+.page-calls .mmeta .tio i{width:11px;height:11px;opacity:.7}
+
+.page-calls .cl-pg{display:flex;align-items:center;gap:6px;flex-wrap:wrap;margin-top:12px;font-size:12px;color:var(--fg-3)}
+.page-calls .cl-pg .cl-pgi{white-space:nowrap}
+.page-calls .cl-pg .cl-pgt{display:inline-flex;align-items:center;gap:4px;white-space:nowrap;padding-left:10px;margin-left:4px;border-left:1px solid var(--line)}
+.page-calls .cl-pg .cl-pgt i{width:11px;height:11px;opacity:.7}
+.page-calls .cl-num,.page-calls .cl-nav{min-width:30px;justify-content:center;padding:6px 9px}
+.page-calls .cl-num.on{background:var(--acc);border-color:var(--acc);color:#fff}
+.page-calls .cl-gap{padding:0 2px;color:var(--fg-3)}
+
+.logcfg-modal .modal-box{max-width:520px}
+.logcfg .lc-row{display:flex;align-items:center;gap:14px;padding:14px 0;border-bottom:1px solid var(--line)}
+.logcfg .lc-row.col{flex-direction:column;align-items:stretch;gap:10px}
+.logcfg .lc-l{display:flex;flex-direction:column;gap:3px;flex:1;min-width:0}
+.logcfg .lc-l b{font-size:13px;color:var(--fg)}
+.logcfg .lc-l span{font-size:11px;color:var(--fg-3);line-height:1.5}
+.logcfg .lc-sw{position:relative;flex:0 0 auto;width:42px;height:24px;padding:0;border-radius:999px;border:1px solid var(--line-2);background:var(--bg-2);cursor:pointer;transition:all var(--ease)}
+.logcfg .lc-sw i{position:absolute;top:3px;left:3px;width:16px;height:16px;border-radius:50%;background:var(--fg-3);transition:all var(--ease)}
+.logcfg .lc-sw.on{background:var(--acc);border-color:var(--acc)}
+.logcfg .lc-sw.on i{left:21px;background:#fff}
+.logcfg .lc-keep{flex-wrap:wrap;align-self:flex-start}
+.logcfg .lc-stat{display:flex;gap:16px;flex-wrap:wrap;padding:14px 0;font-size:11px;color:var(--fg-3)}
+.logcfg .lc-stat span{display:inline-flex;align-items:center;gap:5px}
+.logcfg .lc-stat i{width:12px;height:12px}
+.logcfg .lc-act{padding-top:4px}

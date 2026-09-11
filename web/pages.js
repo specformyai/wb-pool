@@ -8,7 +8,7 @@
  * ============================================================ */
 
 import {
-  $, $$, apiFetch, confirmDialog, copyText, el, errorState, escapeHtml, fmtDur, fmtInt, fmtMoney, fmtTime, openModal, poll, refreshIcons, skeleton, toast,
+  $, $$, apiFetch, confirmDialog, copyText, el, errorState, escapeHtml, fmtClock, fmtDur, fmtInt, fmtMoney, fmtTime, openModal, poll, refreshIcons, skeleton, toast,
 } from '@/shared.js';
 import { selectify } from '@/selectify.js';
 
@@ -252,6 +252,19 @@ async function deleteKey(k) {
 // fmtDur/fmtTime 未约定 null 行为，这里兜底成占位符
 const dur = v => (v == null ? '—' : fmtDur(v));
 const tm = v => (v ? fmtTime(v) : '—');
+// 24 小时制具体时间：带日期 / 只要时钟两种
+const clk = v => (v ? fmtClock(v, true) : '—');
+const clkT = v => (v ? fmtClock(v, false) : '—');
+// 文件体积；日志设置面板要显示 calls.jsonl 占多大
+const fmtBytes = (n) => {
+  const v = Number(n);
+  if (!Number.isFinite(v) || v <= 0) return '0 B';
+  const u = ['B', 'KB', 'MB', 'GB'];
+  let i = 0;
+  let x = v;
+  while (x >= 1024 && i < u.length - 1) { x /= 1024; i += 1; }
+  return `${i === 0 ? x : x.toFixed(1)} ${u[i]}`;
+};
 const pct = v => (v == null ? '—' : (v * 100).toFixed(1) + '%');
 // 页内可重试错误态：硬性规则要求失败不能只 toast
 const errBox = (msg, act) => `<div class="errbox"><i data-lucide="alert-triangle"></i><span>${esc(msg)}</span><button class="btn" data-act="${act}">重试</button></div>`;
@@ -260,11 +273,30 @@ const errBox = (msg, act) => `<div class="errbox"><i data-lucide="alert-triangle
 // state 权重：bad 最前、idle 最后，让运维第一眼落在出问题的模型上
 const ST_ORDER = { bad: 0, degraded: 1, ok: 2, idle: 3 };
 const ST_LABEL = { ok: '正常', degraded: '波动', bad: '异常', idle: '空闲' };
-// 窗口预设；buckets 即热条格数，7d 用 28 格（6h/格），168 格会密到看不清
+// 健康窗口预设；buckets 即热条格数，7d 用 28 格（6h/格），168 格会密到看不清
 const WINDOWS = [{ h: 1, b: 24, t: '1h' }, { h: 6, b: 24, t: '6h' }, { h: 24, b: 24, t: '24h' }, { h: 168, b: 28, t: '7d' }];
 
-// win 放模块级：切页再回来保留用户上次选的窗口
-const calls = { root: null, win: 2, timer: null, onVis: null };
+/* 时间分组的权威来源是后端 /api/calls/ranges。这里只留一份兜底，
+ * 用于接口还没回来时先把按钮画出来 —— 前端自己维护一套档位就会和后端漂移。 */
+const RANGE_FALLBACK = [
+  { key: '24h', label: '24 小时' }, { key: 'today', label: '当天' },
+  { key: '3d', label: '3 天' }, { key: '7d', label: '一周' },
+  { key: '30d', label: '一个月' }, { key: 'all', label: '全部' },
+];
+const PER_PAGE = 15;              // 一页最多 15 条
+/* 保留策略档位。0 = 永不删除。 */
+const RETENTION_OPTS = [
+  { d: 0, t: '不删除' }, { d: 1, t: '1 天' }, { d: 3, t: '3 天' },
+  { d: 7, t: '7 天' }, { d: 30, t: '30 天' }, { d: 90, t: '90 天' },
+  { d: 365, t: '365 天' },
+];
+
+/* 模块级：切页再回来保留用户上次选的窗口 / 分组 / 页码 */
+const calls = {
+  root: null, win: 2, range: '24h', page: 1,
+  ranges: RANGE_FALLBACK.slice(),
+  es: null, onVis: null, retry: 0, healthAt: 0,
+};
 
 export function mountCalls(root) {
   calls.root = root;
@@ -274,55 +306,157 @@ export function mountCalls(root) {
       <h2><i data-lucide="activity"></i>调用监控</h2>
       <div class="seg">${WINDOWS.map((w, i) => `<button data-act="win" data-i="${i}" class="${i === calls.win ? 'on' : ''}">${w.t}</button>`).join('')}</div>
       <span style="flex:1"></span>
+      <span class="cl-live" id="cLive"><i data-lucide="radio"></i><span>连接中</span></span>
+      <button class="btn" data-act="logcfg"><i data-lucide="settings-2"></i>日志设置</button>
       <button class="btn danger" data-act="reset"><i data-lucide="trash-2"></i>清空日志</button>
     </div>
     <div class="grid" id="cGrid">${skeleton(3)}</div>
-    <div class="ph"><h2><i data-lucide="list"></i>最近调用</h2><span class="muted" id="cHint"></span></div>
-    <div class="tblwrap" id="cRecent">${skeleton(5)}</div>`;
+    <div class="ph">
+      <h2><i data-lucide="list"></i>调用日志</h2>
+      <div class="seg" id="cRange"></div>
+      <span style="flex:1"></span>
+      <span class="muted" id="cHint"></span>
+    </div>
+    <div class="tblwrap" id="cRecent">${skeleton(5)}</div>
+    <div class="cl-pg" id="cPager"></div>`;
+  renderRanges();
   refreshIcons();
   root.addEventListener('click', onCallsClick);
-  // 页面不可见时轮询纯属浪费后端配额：隐藏即暂停，回来时立即补一次再恢复
-  calls.onVis = () => { if (document.hidden) stopCallsPoll(); else { refreshCalls(true); startCallsPoll(); } };
+  /* 页面隐藏时断开推送连接（省掉后台无谓流量），回来时重连并补一次全量 */
+  calls.onVis = () => {
+    if (document.hidden) closeStream();
+    else { loadHealth(true); loadPage(true); openStream(); }
+  };
   document.addEventListener('visibilitychange', calls.onVis);
-  refreshCalls(false);
-  startCallsPoll();
+  loadRanges();
+  loadHealth(false);
+  loadPage(false);
+  openStream();
 }
 
 export function unmountCalls() {
-  stopCallsPoll(); // 必须清，否则切页后 15s 轮询泄漏
+  closeStream();                 // 必须关，否则切页后连接泄漏
   if (calls.onVis) document.removeEventListener('visibilitychange', calls.onVis);
-  if (calls.root) { calls.root.removeEventListener('click', onCallsClick); calls.root.classList.remove('page-calls'); calls.root.innerHTML = ''; }
+  if (calls.root) {
+    calls.root.removeEventListener('click', onCallsClick);
+    calls.root.classList.remove('page-calls');
+    calls.root.innerHTML = '';
+  }
   calls.root = null;
 }
 
-function startCallsPoll() { stopCallsPoll(); calls.timer = setInterval(() => refreshCalls(true), 15000); }
-function stopCallsPoll() { if (calls.timer) { clearInterval(calls.timer); calls.timer = null; } }
-function refreshCalls(silent) { loadHealth(silent); loadRecent(silent); }
-
-function onCallsClick(e) {
-  const t = e.target.closest('[data-act]');
-  if (!t) return;
-  const act = t.dataset.act;
-  if (act === 'win') { // 切窗口只影响健康卡，「最近调用」与窗口无关不重拉
-    calls.win = +t.dataset.i;
-    $$('.page-calls .seg button').forEach(b => b.classList.toggle('on', b === t));
-    loadHealth(false);
-  } else if (act === 'reset') resetCalls();
-  else if (act === 'retry-h') loadHealth(false);
-  else if (act === 'retry-r') loadRecent(false);
-  else if (act === 'err') t.classList.toggle('open'); // 错误文本点击展开/收起
+/* ---------- 后端推送（替代原来的 15s 轮询） ---------- */
+/* 为什么用 SSE 而不是定时拉：轮询在没有新调用时也要拉全量，
+ * 而 EventSource 由后端在 calllog 版本号变化时才推 —— 省流量且是即时的。
+ * EventSource 不能带自定义头，但会自动带 cookie，后端 /api/calls/stream
+ * 就是按 cookie 鉴权的。 */
+function openStream() {
+  closeStream();
+  if (!calls.root) return;
+  const qs = `range=${encodeURIComponent(calls.range)}&page=${calls.page}&per_page=${PER_PAGE}`;
+  let es;
+  try {
+    es = new EventSource(`/api/calls/stream?${qs}`);
+  } catch {
+    liveState('off', '推送不可用');
+    return;
+  }
+  calls.es = es;
+  es.onopen = () => { calls.retry = 0; liveState('on', '实时'); };
+  es.addEventListener('calls', (ev) => {
+    let d;
+    try { d = JSON.parse(ev.data); } catch { return; }
+    if (!calls.root) return;
+    liveState('on', '实时');
+    applyPage(d);
+    /* 有新调用才刷健康卡，且最多每 5 秒一次 —— 健康卡是聚合查询，
+     * 每条调用都重算会把后端 CPU 打上去。 */
+    const now = Date.now();
+    if (now - calls.healthAt > 5000) { calls.healthAt = now; loadHealth(true); }
+  });
+  es.addEventListener('bye', () => { closeStream(); scheduleReopen(); });
+  es.onerror = () => {
+    /* EventSource 自带重连，但连接被中间代理掐断时它可能长时间不动，
+     * 所以自己也排一次退避重连，并把状态显式告诉用户。 */
+    liveState('off', '重连中');
+    closeStream();
+    scheduleReopen();
+  };
 }
 
+function scheduleReopen() {
+  if (!calls.root) return;
+  const wait = Math.min(30000, 1000 * Math.pow(2, calls.retry++));
+  setTimeout(() => { if (calls.root && !calls.es) openStream(); }, wait);
+}
+
+function closeStream() {
+  if (calls.es) { try { calls.es.close(); } catch { /* 已关 */ } calls.es = null; }
+}
+
+function liveState(cls, text) {
+  const box = $('#cLive');
+  if (!box) return;
+  box.className = 'cl-live ' + cls;
+  const span = box.querySelector('span');
+  if (span) span.textContent = text;
+}
+
+/* ---------- 交互 ---------- */
+function onCallsClick(e) {
+  const t = e.target.closest('[data-act]');
+  if (!t || t.disabled) return;
+  const act = t.dataset.act;
+  if (act === 'win') {                    // 切健康窗口，与日志分组互不影响
+    calls.win = +t.dataset.i;
+    $$('.page-calls .ph .seg button[data-act="win"]').forEach(b => b.classList.toggle('on', b === t));
+    loadHealth(false);
+  } else if (act === 'range') {
+    calls.range = t.dataset.k;
+    calls.page = 1;                       // 换分组必须回第一页，否则可能停在越界页
+    renderRanges();
+    loadPage(false);
+    openStream();                         // 推送要跟着新分组/页码走
+  } else if (act === 'pg') {
+    const p = +t.dataset.p;
+    if (!Number.isFinite(p) || p === calls.page) return;
+    calls.page = p;
+    loadPage(false);
+    openStream();
+  } else if (act === 'reset') resetCalls();
+  else if (act === 'logcfg') openLogCfg();
+  else if (act === 'retry-h') loadHealth(false);
+  else if (act === 'retry-r') loadPage(false);
+  else if (act === 'err') t.classList.toggle('open');
+}
+
+function renderRanges() {
+  const box = $('#cRange');
+  if (!box) return;
+  box.innerHTML = calls.ranges.map(r =>
+    `<button data-act="range" data-k="${esc(r.key)}" class="${r.key === calls.range ? 'on' : ''}">${esc(r.label)}</button>`).join('');
+}
+
+async function loadRanges() {
+  try {
+    const d = await apiFetch('/api/calls/ranges');
+    if (Array.isArray(d.ranges) && d.ranges.length) {
+      calls.ranges = d.ranges;
+      if (!calls.ranges.some(r => r.key === calls.range)) calls.range = d.default || '24h';
+      renderRanges();
+    }
+  } catch { /* 用兜底档位，不影响主流程 */ }
+}
+
+/* ---------- 健康卡 ---------- */
 async function loadHealth(silent) {
   const grid = $('#cGrid');
   if (!grid) return;
-  if (!silent) grid.innerHTML = skeleton(3); // 轮询走静默刷新，否则骨架屏每 15s 闪一次
+  if (!silent) grid.innerHTML = skeleton(3);
   try {
     const w = WINDOWS[calls.win];
     const d = await apiFetch(`/api/calls/health?window_h=${w.h}&buckets=${w.b}`);
     renderHealth(grid, d.models || []);
-    const hint = $('#cHint');
-    if (hint) hint.textContent = '每 15s 自动刷新 · 更新于 ' + tm(d.generated_at);
   } catch (err) {
     grid.innerHTML = errBox('健康数据加载失败：' + err.message, 'retry-h');
     refreshIcons();
@@ -338,38 +472,184 @@ function renderHealth(grid, models) {
       <div class="mmain"><span class="rate">${pct(m.rate)}</span><span class="msub">成功率 · 窗口内 ${fmtInt(m.total)} 次调用</span></div>
       <div class="mmeta">
         <span>p50 ${dur(m.p50_ms)}</span><span>p95 ${dur(m.p95_ms)}</span>
-        <span>${fmtInt(m.tokens)} tok</span><span>${fmtMoney(m.credits)} 积分</span>
-        <span>${fmtInt(m.accounts)} 账号</span><span>最近 ${tm(m.last_ts)}</span>
+        <span class="tio"><i data-lucide="arrow-up"></i>${fmtInt(m.in_tokens)}</span>
+        <span class="tio"><i data-lucide="arrow-down"></i>${fmtInt(m.out_tokens)}</span>
+        <span>${fmtMoney(m.credits)} 积分</span>
+        <span>${fmtInt(m.accounts)} 账号</span>
+        <span title="${esc(clk(m.last_ts))}">最近 ${clkT(m.last_ts)}</span>
       </div>
       ${m.last_error && m.state !== 'ok' ? `<div class="merr" title="${esc(m.last_error)}">${esc(m.last_error)}</div>` : ''}
       <div class="hstrip">${(m.buckets || []).map(bk => `<i class="s-${esc(bk.state || 'idle')}" data-tip="成功 ${bk.ok} / 失败 ${bk.fail}"></i>`).join('')}</div>
     </div>`).join('');
+  refreshIcons();
 }
 
-async function loadRecent(silent) {
+/* ---------- 日志表（分页 + 上下行 token） ---------- */
+async function loadPage(silent) {
   const box = $('#cRecent');
   if (!box) return;
   if (!silent) box.innerHTML = skeleton(5);
   try {
-    const d = await apiFetch('/api/calls/recent?limit=80');
-    renderRecent(box, d.calls || []);
+    const qs = `range=${encodeURIComponent(calls.range)}&page=${calls.page}&per_page=${PER_PAGE}`;
+    applyPage(await apiFetch(`/api/calls?${qs}`));
   } catch (err) {
     box.innerHTML = errBox('调用日志加载失败：' + err.message, 'retry-r');
     refreshIcons();
   }
 }
 
+/* 全量拉取和 SSE 推送走同一个渲染入口，避免两条路径渲染结果不一致 */
+function applyPage(d) {
+  if (!calls.root || !d) return;
+  /* 后端会把越界页夹到最后一页，这里跟着同步，否则翻页按钮的高亮会和内容错位 */
+  if (d.page && d.page !== calls.page) calls.page = d.page;
+  if (d.range && d.range !== calls.range) { calls.range = d.range; renderRanges(); }
+  renderRecent($('#cRecent'), d.calls || []);
+  renderPager(d);
+  const hint = $('#cHint');
+  if (hint) {
+    const off = d.enabled === false ? '日志已关闭 · ' : '';
+    const keep = d.retention_days ? `保留 ${d.retention_days} 天 · ` : '永久保留 · ';
+    hint.textContent = `${off}${keep}更新于 ${clk(d.generated_at)}`;
+  }
+}
+
 function renderRecent(box, list) {
-  if (!list.length) { box.innerHTML = '<div class="empty">暂无调用日志</div>'; return; }
+  if (!box) return;
+  if (!list.length) { box.innerHTML = '<div class="empty">该时间范围内暂无调用日志</div>'; return; }
   box.innerHTML = `<table>
-    <thead><tr><th>时间</th><th>模型</th><th>账号</th><th>状态码</th><th>耗时</th><th>Tokens</th><th>积分</th><th>错误</th></tr></thead>
+    <thead><tr>
+      <th>时间</th><th>模型</th><th>账号</th><th>状态码</th><th>耗时</th>
+      <th class="tr">上行</th><th class="tr">下行</th><th class="tr">积分</th><th>错误</th>
+    </tr></thead>
     <tbody>${list.map(c => `
       <tr class="${c.ok ? '' : 'fail'}">
-        <td>${tm(c.ts)}</td><td>${esc(c.model)}</td><td>${esc(c.account ?? c.phone ?? '')}</td>
+        <td class="mono nowrap">${esc(clk(c.ts))}</td>
+        <td>${esc(c.model)}</td><td>${esc(c.account ?? c.phone ?? '')}</td>
         <td class="${c.ok ? 'tok' : 'tbad'}">${c.code ?? c.status ?? '—'}</td>
-        <td>${dur(c.ms)}</td><td>${fmtInt(c.tokens)}</td><td>${fmtMoney(c.credits)}</td>
+        <td>${dur(c.ms)}</td>
+        <td class="tr mono">${fmtInt(c.in_tokens)}</td>
+        <td class="tr mono">${fmtInt(c.out_tokens)}</td>
+        <td class="tr">${fmtMoney(c.credits)}</td>
         <td>${c.error ? `<span class="errtxt" data-act="err" title="点击展开">${esc(c.error)}</span>` : ''}</td>
       </tr>`).join('')}</tbody></table>`;
+}
+
+/* 页码列表：首尾常驻，当前页两侧各留一个，其余折成省略号 */
+function pageNums(cur, pages) {
+  if (pages <= 7) return Array.from({ length: pages }, (_, i) => i + 1);
+  const s = new Set([1, pages, cur, cur - 1, cur + 1]);
+  const nums = [...s].filter(n => n >= 1 && n <= pages).sort((a, b) => a - b);
+  const out = [];
+  let prev = 0;
+  for (const n of nums) {
+    if (prev && n - prev > 1) out.push('…');
+    out.push(n);
+    prev = n;
+  }
+  return out;
+}
+
+function renderPager(d) {
+  const box = $('#cPager');
+  if (!box) return;
+  if (!d.total) { box.innerHTML = ''; return; }
+  const pages = d.pages || 1;
+  const cur = d.page || 1;
+  box.innerHTML = `
+    <span class="cl-pgi">共 ${fmtInt(d.total)} 条 · 第 ${cur}/${pages} 页</span>
+    <span class="cl-pgt">本页 <i data-lucide="arrow-up"></i>${fmtInt(d.page_in_tokens)} <i data-lucide="arrow-down"></i>${fmtInt(d.page_out_tokens)}</span>
+    <span style="flex:1"></span>
+    <button class="btn cl-nav" data-act="pg" data-p="1"${cur <= 1 ? ' disabled' : ''}><i data-lucide="chevrons-left"></i></button>
+    <button class="btn cl-nav" data-act="pg" data-p="${cur - 1}"${cur <= 1 ? ' disabled' : ''}><i data-lucide="chevron-left"></i></button>
+    ${pageNums(cur, pages).map(n => n === '…'
+      ? '<span class="cl-gap">…</span>'
+      : `<button class="btn cl-num${n === cur ? ' on' : ''}" data-act="pg" data-p="${n}">${n}</button>`).join('')}
+    <button class="btn cl-nav" data-act="pg" data-p="${cur + 1}"${cur >= pages ? ' disabled' : ''}><i data-lucide="chevron-right"></i></button>
+    <button class="btn cl-nav" data-act="pg" data-p="${pages}"${cur >= pages ? ' disabled' : ''}><i data-lucide="chevrons-right"></i></button>`;
+  refreshIcons();
+}
+
+/* ---------- 日志设置（开关 + 保留策略 + 立即清理） ---------- */
+async function openLogCfg() {
+  let st;
+  try {
+    st = await apiFetch('/api/calls/stats');
+  } catch (err) {
+    toast('读取日志状态失败：' + err.message, 'err');
+    return;
+  }
+  let on = st.enabled !== false;
+  let keep = Number(st.retention_days || 0);
+  const span = (st.oldest_ts && st.newest_ts)
+    ? `${clk(st.oldest_ts)} ~ ${clk(st.newest_ts)}` : '暂无记录';
+  const m = openModal(`
+    <div class="modal-hd"><h3><i data-lucide="settings-2"></i>日志设置</h3>
+      <button class="x" data-close><i data-lucide="x"></i></button></div>
+    <div class="modal-bd logcfg">
+      <div class="lc-row">
+        <div class="lc-l"><b>记录调用日志</b><span>关闭后不再写入任何新记录，已有记录保留</span></div>
+        <button class="lc-sw${on ? ' on' : ''}" data-lc="sw" role="switch" aria-checked="${on}"><i></i></button>
+      </div>
+      <div class="lc-row col">
+        <div class="lc-l"><b>自动清理</b><span>超过该时长的记录会被自动删除，每小时检查一次</span></div>
+        <div class="seg lc-keep">${RETENTION_OPTS.map(o =>
+          `<button data-lc="keep" data-d="${o.d}" class="${o.d === keep ? 'on' : ''}">${o.t}</button>`).join('')}</div>
+      </div>
+      <div class="lc-stat">
+        <span><i data-lucide="database"></i>${fmtInt(st.rows)} 条 · ${fmtBytes(st.bytes)}</span>
+        <span><i data-lucide="clock"></i>${esc(span)}</span>
+      </div>
+      <div class="lc-act">
+        <button class="btn" data-lc="prune"><i data-lucide="eraser"></i>按策略立即清理</button>
+      </div>
+    </div>
+    <div class="modal-ft">
+      <button class="btn" data-close>取消</button>
+      <button class="btn primary" data-lc="save"><i data-lucide="check"></i>保存</button>
+    </div>`, { size: 'sm', scope: 'logcfg-modal' });
+
+  const box = m.box;
+  box.addEventListener('click', async (e) => {
+    const t = e.target.closest('[data-lc]');
+    if (!t || t.disabled) return;
+    const k = t.dataset.lc;
+    if (k === 'sw') {
+      on = !on;
+      t.classList.toggle('on', on);
+      t.setAttribute('aria-checked', String(on));
+    } else if (k === 'keep') {
+      keep = Number(t.dataset.d);
+      box.querySelectorAll('[data-lc="keep"]').forEach(b => b.classList.toggle('on', b === t));
+    } else if (k === 'prune') {
+      t.disabled = true;
+      try {
+        const r = await apiFetch('/api/calls/prune', { method: 'POST', body: {} });
+        toast(r.skipped ? '当前设为不删除，未清理任何记录'
+          : `已清理 ${fmtInt(r.removed)} 条（保留 ${r.days} 天）`, 'ok');
+        loadPage(true);
+      } catch (err) { toast('清理失败：' + err.message, 'err'); }
+      t.disabled = false;
+    } else if (k === 'save') {
+      t.disabled = true;
+      try {
+        /* 专用端点而不是通用 /api/settings：本项目两个部署形态的配置层
+         * 不一样（一边有 settings.json 运行时配置层，一边直读环境变量），
+         * 用 /api/calls/config 让前端契约在两边都成立。 */
+        await apiFetch('/api/calls/config', {
+          method: 'POST',
+          body: { enabled: on, retention_days: keep },
+        });
+        toast('已保存，立即生效', 'ok');
+        m.close();
+        loadPage(true);
+      } catch (err) {
+        toast('保存失败：' + err.message, 'err');
+        t.disabled = false;
+      }
+    }
+  });
+  refreshIcons();
 }
 
 async function resetCalls() {
@@ -377,7 +657,9 @@ async function resetCalls() {
   try {
     await apiFetch('/api/calls/reset', { method: 'POST' });
     toast('日志已清空', 'ok');
-    refreshCalls(true);
+    calls.page = 1;
+    loadPage(true);
+    loadHealth(true);
   } catch (err) { toast('清空失败：' + err.message, 'err'); }
 }
 

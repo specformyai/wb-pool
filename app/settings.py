@@ -76,6 +76,17 @@ SPEC: dict[str, dict[str, Any]] = {
     "expiring_soon_h": {"type": "int", "env": "WB_EXPIRING_SOON_H",
                         "default": 72, "min": 1, "max": 8760},
 
+    # ---- 调用日志 ----
+    # 关掉后 CallLog.record() 一个字节都不写（连文件都不碰）。
+    # 用 settings 而不是模块常量：面板上一点就得生效，不能要求重启。
+    "calls_log_enabled": {"type": "bool", "env": "WB_CALLS_LOG", "default": True},
+    # 保留天数。**0 = 永不删除**（用户明确要求要有这一档），
+    # 上限 3650 只是防手滑输入天文数字，不是业务约束。
+    # 注意这与 CallLog.MAX_LINES 是两套独立机制：这里按时间删，
+    # MAX_LINES 按行数截断兜底，防单文件无限膨胀。
+    "calls_retention_days": {"type": "int", "env": "WB_CALLS_RETENTION_DAYS",
+                             "default": 0, "min": 0, "max": 3650},
+
     # ---- 时区 ----
     # 项目里有十几处 time.strftime("%Y-%m-%d") 按**本地时间**算「今天」，
     # 签到判重（last_checkin == today）和面板「今日签到到账」列都依赖它。

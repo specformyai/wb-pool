@@ -10,6 +10,23 @@
   给前端画可用性观察条
 
 字段刻意保持扁平，方便直接 `jq` 或 pandas 读。
+
+2026-09-11 增补（四件事，都由运行时配置驱动，不重启生效）
+--------------------------------------------------------
+1. **上行 / 下行 token 分开记**：原先只有一个 `tokens`（= total），
+   看不出是提示词吃掉的还是生成吃掉的。新增 `in_tokens` / `out_tokens`，
+   `tokens` 保留为总数（老数据、老前端不破）。历史行没有这两个字段，
+   读取侧一律用 `.get(..., 0)`，并在聚合里单独统计「有明细的行数」，
+   免得把缺字段当成 0 混进平均值。
+2. **日志开关**：`enabled_getter` 返回 False 时 `record()` 直接返回，
+   一个字节都不写。开关值来自 settings 层（面板可改），不是模块常量 ——
+   写成常量就又是「改完不生效」。
+3. **保留策略**：`retention_getter` 给天数，`prune()` 删掉早于该天数的行；
+   返回 0 表示**永不删除**（用户明确要求要有这一档）。截断上限
+   `MAX_LINES` 依旧独立生效，那是防单文件无限膨胀的兜底。
+4. **变更版本号**：每次写入 `_version += 1`。SSE 端点靠比对版本号决定
+   「要不要推」，从而把前端的 15s 轮询换成后端驱动的即时推送 ——
+   没有新调用时一个字节都不发。
 """
 from __future__ import annotations
 
@@ -17,7 +34,7 @@ import json
 import threading
 import time
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 MAX_LINES = 20000          # 超过就截断到一半
 DEFAULT_WINDOW_H = 24
@@ -25,21 +42,97 @@ DEFAULT_BUCKETS = 24
 TAIL_N = 12                # 「最近」看多少次调用
 TAIL_FAIL_STREAK = 3       # 末尾连续失败几次就判 bad
 
+# 时间分组：key -> 中文标签。since 由 range_since() 算，「当天」是本地零点
+# 而不是「24 小时前」—— 这两个在下午三点差着十五个小时，用户要的是前者。
+RANGES: dict[str, str] = {
+    "24h": "24 小时",
+    "today": "当天",
+    "3d": "3 天",
+    "7d": "一周",
+    "30d": "一个月",
+    "all": "全部",
+}
+DEFAULT_RANGE = "24h"
+DEFAULT_PER_PAGE = 15
+MAX_PER_PAGE = 200
+
+
+def range_since(key: str, now: float | None = None) -> float:
+    """把分组 key 换成起始时间戳。0 = 不限。
+
+    「当天」用 time.localtime 取本地零点 —— 服务进程启动时按 settings 的
+    timezone 设过 TZ，所以这里的「今天」与签到判重是同一个口径。
+    """
+    now = time.time() if now is None else now
+    k = (key or DEFAULT_RANGE).strip().lower()
+    if k == "all":
+        return 0.0
+    if k == "today":
+        lt = time.localtime(now)
+        return time.mktime((lt.tm_year, lt.tm_mon, lt.tm_mday,
+                            0, 0, 0, lt.tm_wday, lt.tm_yday, lt.tm_isdst))
+    hours = {"24h": 24, "3d": 72, "7d": 168, "30d": 720}.get(k)
+    if hours is None:
+        hours = 24
+    return now - hours * 3600
+
 
 class CallLog:
-    def __init__(self, path: str | Path, max_lines: int = MAX_LINES):
+    def __init__(self, path: str | Path, max_lines: int = MAX_LINES,
+                 enabled_getter: Callable[[], bool] | None = None,
+                 retention_getter: Callable[[], int] | None = None):
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.max_lines = max_lines
         self._lock = threading.RLock()
         self._writes = 0
+        # 用 getter 而不是存值：面板改完立刻生效，不用重启也不用回调同步
+        self._enabled_getter = enabled_getter
+        self._retention_getter = retention_getter
+        self._version = 0          # 每次写入 +1，SSE 靠它判断有没有新数据
+        self._last_prune = 0.0
+
+    # ---------------- 开关 / 策略 ----------------
+    @property
+    def enabled(self) -> bool:
+        if self._enabled_getter is None:
+            return True
+        try:
+            return bool(self._enabled_getter())
+        except Exception:  # noqa: BLE001 —— 配置层出问题不该让埋点崩掉调用链
+            return True
+
+    @property
+    def retention_days(self) -> int:
+        if self._retention_getter is None:
+            return 0
+        try:
+            return max(0, int(self._retention_getter() or 0))
+        except Exception:  # noqa: BLE001
+            return 0
+
+    @property
+    def version(self) -> int:
+        with self._lock:
+            return self._version
 
     # ---------------- 写 ----------------
     def record(self, *, model: str, ok: bool, endpoint: str = "chat",
                ms: int = 0, ttft_ms: int = 0, tps: float = 0.0,
-               tokens: int = 0, credits: float = 0.0,
+               tokens: int = 0, in_tokens: int = 0, out_tokens: int = 0,
+               credits: float = 0.0,
                account: str = "", key_id: str = "", key_name: str = "",
                code: Any = None, error: str = "", stream: bool = False) -> None:
+        # 开关关掉时连文件都不碰。注意仍然要 return 得干净 ——
+        # 这个函数的所有调用点都在请求主链路上，不能抛。
+        if not self.enabled:
+            return
+        it = int(in_tokens or 0)
+        ot = int(out_tokens or 0)
+        tk = int(tokens or 0)
+        # 只给了上下行没给总数时自己补总数，反之不猜明细（缺就是缺，别造数）
+        if not tk and (it or ot):
+            tk = it + ot
         row = {
             "ts": round(time.time(), 3),
             "model": model or "unknown",
@@ -49,7 +142,9 @@ class CallLog:
             "ms": int(ms or 0),
             "ttft_ms": int(ttft_ms or 0),
             "tps": round(float(tps or 0), 2),
-            "tokens": int(tokens or 0),
+            "tokens": tk,
+            "in_tokens": it,
+            "out_tokens": ot,
             "credits": round(float(credits or 0), 6),
             "account": account or "",
             "key_id": key_id or "",
@@ -65,8 +160,12 @@ class CallLog:
             except Exception:  # noqa: BLE001
                 return
             self._writes += 1
+            self._version += 1
             if self._writes % 200 == 0:
                 self._truncate_if_needed()
+        # 保留策略最多每小时检查一次：它要整文件重写，不能每次调用都做
+        if self.retention_days and time.time() - self._last_prune > 3600:
+            self.prune()
 
     def _truncate_if_needed(self) -> None:
         try:
@@ -81,6 +180,47 @@ class CallLog:
             tmp.replace(self.path)
         except Exception:  # noqa: BLE001
             pass
+
+    def prune(self, days: int | None = None) -> dict[str, Any]:
+        """删掉早于 N 天的记录。days=0 或 None 且策略为 0 → 什么都不做。
+
+        返回 {removed, kept, days}，供接口回报和测试断言。
+        """
+        d = self.retention_days if days is None else max(0, int(days or 0))
+        if not d:
+            return {"removed": 0, "kept": -1, "days": 0, "skipped": True}
+        cutoff = time.time() - d * 86400
+        with self._lock:
+            self._last_prune = time.time()
+            if not self.path.exists():
+                return {"removed": 0, "kept": 0, "days": d}
+            kept: list[str] = []
+            removed = 0
+            try:
+                for ln in self.path.read_text(encoding="utf-8",
+                                              errors="ignore").splitlines():
+                    s = ln.strip()
+                    if not s:
+                        continue
+                    try:
+                        ts = float(json.loads(s).get("ts") or 0)
+                    except Exception:  # noqa: BLE001 —— 坏行留着，别静默丢数据
+                        kept.append(s)
+                        continue
+                    if ts < cutoff:
+                        removed += 1
+                    else:
+                        kept.append(s)
+                if removed:
+                    tmp = self.path.with_suffix(".tmp")
+                    tmp.write_text(("\n".join(kept) + "\n") if kept else "",
+                                   encoding="utf-8")
+                    tmp.replace(self.path)
+                    self._version += 1
+            except Exception:  # noqa: BLE001
+                return {"removed": 0, "kept": len(kept), "days": d,
+                        "error": "prune failed"}
+            return {"removed": removed, "kept": len(kept), "days": d}
 
     # ---------------- 读 ----------------
     def rows(self, since: float = 0.0, limit: int = 0) -> list[dict[str, Any]]:
@@ -110,21 +250,102 @@ class CallLog:
         rows = self.rows()
         return list(reversed(rows[-limit:]))
 
+    def query(self, *, range_key: str = DEFAULT_RANGE, page: int = 1,
+              per_page: int = DEFAULT_PER_PAGE, model: str = "",
+              ok: bool | None = None) -> dict[str, Any]:
+        """分页查询（新→旧）。
+
+        分页在服务端做：前端一页只要 15 条，把两万行全推过去纯属浪费 ——
+        用户明确要求「一页最多 15 条，多的翻页看」。
+
+        返回 total / pages 让前端能画页码；page 超界时夹到最后一页而不是
+        回空列表（否则删日志后停在第 9 页会看到「暂无数据」，像是坏了）。
+        """
+        rk = (range_key or DEFAULT_RANGE).strip().lower()
+        if rk not in RANGES:
+            rk = DEFAULT_RANGE
+        since = range_since(rk)
+        rows = self.rows(since=since)
+        if model:
+            rows = [r for r in rows if (r.get("model") or "") == model]
+        if ok is not None:
+            rows = [r for r in rows if bool(r.get("ok")) == bool(ok)]
+        rows.reverse()                      # 新的在前
+
+        per = max(1, min(MAX_PER_PAGE, int(per_page or DEFAULT_PER_PAGE)))
+        total = len(rows)
+        pages = max(1, (total + per - 1) // per)
+        p = max(1, int(page or 1))
+        if p > pages:
+            p = pages
+        start = (p - 1) * per
+        page_rows = rows[start:start + per]
+
+        # 本页的上下行汇总：前端页脚直接显示，不用自己再 reduce 一遍
+        sum_in = sum(int(r.get("in_tokens") or 0) for r in page_rows)
+        sum_out = sum(int(r.get("out_tokens") or 0) for r in page_rows)
+        return {
+            "calls": page_rows,
+            "total": total, "page": p, "pages": pages, "per_page": per,
+            "range": rk, "range_label": RANGES[rk], "since": since,
+            "model": model, "ok": ok,
+            "page_in_tokens": sum_in, "page_out_tokens": sum_out,
+            "enabled": self.enabled,
+            "retention_days": self.retention_days,
+            "version": self.version,
+            "generated_at": time.time(),
+        }
+
+    def stats(self) -> dict[str, Any]:
+        """文件层面的概况：给「日志设置」面板显示当前占用与跨度。"""
+        n = 0
+        oldest = 0.0
+        newest = 0.0
+        for r in self.rows():
+            n += 1
+            ts = float(r.get("ts") or 0)
+            if ts:
+                oldest = ts if not oldest else min(oldest, ts)
+                newest = max(newest, ts)
+        size = 0
+        try:
+            size = self.path.stat().st_size if self.path.exists() else 0
+        except OSError:
+            size = 0
+        return {
+            "rows": n, "bytes": size,
+            "oldest_ts": oldest or None, "newest_ts": newest or None,
+            "enabled": self.enabled, "retention_days": self.retention_days,
+            "max_lines": self.max_lines, "version": self.version,
+        }
+
     # ---------------- 聚合 ----------------
     def health(self, window_h: int = DEFAULT_WINDOW_H,
                buckets: int = DEFAULT_BUCKETS,
-               known_models: list[str] | None = None) -> dict[str, Any]:
+               known_models: list[str] | None = None,
+               since: float | None = None) -> dict[str, Any]:
         """
         按模型聚合可用性。返回：
           models: [{model, total, ok, fail, rate, p50_ms, p95_ms, last_ts,
                     last_ok_ts, last_error, state, buckets:[{ok,fail,state}]}]
           state: ok(≥95%) / degraded(60~95%) / bad(<60%) / idle(窗口内无调用)
+
+        since 显式给值时以它为准（时间分组用），此时 window_h 只用来算桶宽。
         """
         window_h = max(1, int(window_h or DEFAULT_WINDOW_H))
         buckets = max(4, min(96, int(buckets or DEFAULT_BUCKETS)))
         now = time.time()
-        span = window_h * 3600
-        since = now - span
+        if since is not None and since > 0:
+            span = max(60.0, now - since)
+        else:
+            span = window_h * 3600
+            since = now - span
+        if since is None or since <= 0:
+            # 「全部」：跨度取最早一条到现在，没有数据就退回窗口
+            first = min((float(r.get("ts") or 0) for r in self.rows()
+                         if r.get("ts")), default=0.0)
+            since = first or (now - window_h * 3600)
+            span = max(60.0, now - since)
         bw = span / buckets
 
         rows = self.rows(since=since)
@@ -133,7 +354,9 @@ class CallLog:
         def slot(model: str) -> dict[str, Any]:
             return agg.setdefault(model, {
                 "model": model, "total": 0, "ok": 0, "fail": 0,
-                "tokens": 0, "credits": 0.0, "lat": [],
+                "tokens": 0, "in_tokens": 0, "out_tokens": 0,
+                "tok_detail_rows": 0,   # 有上下行明细的行数（老数据没有）
+                "credits": 0.0, "lat": [],
                 "recent": [],          # [(ts, ttft_ms, tps)] 只收成功的，用于「近期」均值
                 "seq": [],             # [(ts, ok)] 全量时序，用于判「现在是不是正在挂」
                 "accs": set(),         # 窗口内实际服务过该模型的账号
@@ -152,6 +375,12 @@ class CallLog:
             e["total"] += 1
             e["ok" if ok else "fail"] += 1
             e["tokens"] += int(r.get("tokens") or 0)
+            it = int(r.get("in_tokens") or 0)
+            ot = int(r.get("out_tokens") or 0)
+            e["in_tokens"] += it
+            e["out_tokens"] += ot
+            if it or ot:
+                e["tok_detail_rows"] += 1
             e["credits"] = round(e["credits"] + float(r.get("credits") or 0), 6)
             if r.get("ms"):
                 e["lat"].append(int(r["ms"]))
@@ -248,6 +477,11 @@ class CallLog:
             "model_count": len(models),
             "abnormal": abnormal, "normal": normal, "idle": idle,
             "avg_rate": round(sum(rates) / len(rates), 4) if rates else None,
+            "in_tokens": sum(m["in_tokens"] for m in models),
+            "out_tokens": sum(m["out_tokens"] for m in models),
+            "enabled": self.enabled,
+            "retention_days": self.retention_days,
+            "version": self.version,
             "models": models,
         }
 
@@ -258,3 +492,4 @@ class CallLog:
             except Exception:  # noqa: BLE001
                 pass
             self._writes = 0
+            self._version += 1

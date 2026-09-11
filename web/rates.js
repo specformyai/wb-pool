@@ -81,7 +81,7 @@ let refs = {};
 let rows = [];          // details[]
 let modelIds = [];      // models[]
 let q = '';
-let sortKey = 'rate-desc';
+let sortKey = 'rate-asc';   /* 默认倍率升序：先看便宜的（用户既定偏好） */
 let capSel = new Set();
 let mountSeq = 0;       // 卸载后使在途请求回调作废
 let stopFns = [];       // 定时器 / 轮询的 stop 函数（本页暂无，保留清理入口）
@@ -92,7 +92,7 @@ export function mountRates(rootEl) {
   root.classList.add('page', 'page-rates');
   const token = ++mountSeq;
   q = '';
-  sortKey = 'rate-desc';
+  sortKey = 'rate-asc';
   capSel = new Set();
   rows = [];
   modelIds = [];
@@ -132,8 +132,8 @@ export function mountRates(rootEl) {
   // 原生 select 的展开列表由系统绘制、CSS 管不到，深色页面上必然白底黑字，
   // 所以这里用自绘的 dropdown 组件（API 对齐：value / change）。
   const sortSel = dropdown([
-    { value: 'rate-desc', label: '倍率降序' },
     { value: 'rate-asc', label: '倍率升序' },
+    { value: 'rate-desc', label: '倍率降序' },
     { value: 'ctx-desc', label: '上下文降序' },
     { value: 'name', label: '名称' },
   ], { value: sortKey, ariaLabel: '排序方式', width: '150px' });
@@ -267,7 +267,7 @@ function filtered() {
     }
     return true;
   });
-  return list.sort(SORTS[sortKey] || SORTS['rate-desc']);
+  return list.sort(SORTS[sortKey] || SORTS['rate-asc']);
 }
 
 function renderGrid() {
