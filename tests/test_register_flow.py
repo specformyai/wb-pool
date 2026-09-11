@@ -348,6 +348,51 @@ class RegisterFlowTest(unittest.TestCase):
         good = self.registrar.finish(s["session_id"], "123456")
         self.assertTrue(good["ok"], f"重填正确验证码失败了: {good}")
 
+    def test_20_cancel_frees_phone_immediately(self):
+        """放弃会话后：会话消失、同号能立刻重新发码、旧会话 id 填码被拒"""
+        s = self.registrar.start("13900000008")
+        self.assertTrue(s.get("ok"), s)
+        # 放弃前同号再发码会被并发守卫拦住（这正是用户抱怨「只能等超时」的根源）
+        dup = self.registrar.start("13900000008")
+        self.assertFalse(dup.get("ok"))
+        self.assertTrue(dup.get("duplicate"))
+
+        r = self.registrar.cancel(s["session_id"], origin="manual")
+        self.assertTrue(r["ok"], r)
+        self.assertTrue(r["found"])
+        self.assertEqual(r["phone"], "+8613900000008")
+        self.assertEqual([x["id"] for x in self.registrar.sessions()
+                          if x["id"] == s["session_id"]], [])
+
+        again = self.registrar.start("13900000008")
+        self.assertTrue(again.get("ok"), f"放弃后同号应能立刻重新发码: {again}")
+        self.assertNotEqual(again["session_id"], s["session_id"])
+        stale = self.registrar.finish(s["session_id"], "123456")
+        self.assertFalse(stale["ok"])
+        self.assertIn("会话", stale["error"])
+
+    def test_21_cancel_is_idempotent(self):
+        """会话不存在/已过期也返回 ok，只是 found=False（终态已成立，不算错）"""
+        r = self.registrar.cancel("no-such-session")
+        self.assertTrue(r["ok"])
+        self.assertFalse(r["found"])
+        s = self.registrar.start("13900000009")
+        self.assertTrue(self.registrar.cancel(s["session_id"])["found"])
+        self.assertFalse(self.registrar.cancel(s["session_id"])["found"])
+
+    def test_22_cancel_respects_origin_guard(self):
+        """手动页（origin=manual）不能放弃自动任务派生的会话；不带 origin 才能放"""
+        s = self.registrar.start("13900000010", origin="auto")
+        self.assertTrue(s.get("ok"), s)
+        blocked = self.registrar.cancel(s["session_id"], origin="manual")
+        self.assertFalse(blocked["ok"])
+        self.assertIn("自动注册任务", blocked["error"])
+        # 守卫拦下时会话必须还在
+        self.assertTrue(any(x["id"] == s["session_id"]
+                            for x in self.registrar.sessions(origin="auto")))
+        freed = self.registrar.cancel(s["session_id"])
+        self.assertTrue(freed["ok"] and freed["found"], freed)
+
     @classmethod
     def tearDownClass(cls) -> None:
         if SERVER:

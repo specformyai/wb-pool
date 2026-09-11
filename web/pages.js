@@ -1426,6 +1426,7 @@ function renderSessions(list) {
         <span class="badge acc">等待验证码</span>
         <span class="mono reg-sess-phone">${escapeHtml(s.phone)}</span>
         <span class="reg-sess-time">${fmtTime(s.created_at)}</span>
+        <span class="reg-sess-time">剩余 ${fmtLeft(s.expires_in)}</span>
         <span class="reg-sess-inv">${s.invite_code ? '邀请码 ' + escapeHtml(s.invite_code) : '无邀请码'}</span>
       </div>
       <div class="reg-sess-ops">
@@ -1440,7 +1441,7 @@ function renderSessions(list) {
       const btn = ev.target.closest('[data-act]');
       if (!btn) return;
       if (btn.dataset.act === 'finish') await finishSess(row, row.dataset.id, btn);
-      else if (btn.dataset.act === 'drop') await dropSess(row);
+      else if (btn.dataset.act === 'drop') await dropSess(row, row.dataset.id, btn);
     });
   });
   refreshIcons();
@@ -1464,12 +1465,30 @@ async function finishSess(row, id, btn) {
   }
 }
 
-async function dropSess(row) {
-  // 后端没有放弃会话的接口，这里仅做前端移除，会话会随后端超时自然失效
-  const ok = await confirmDialog('放弃会话', '仅从列表移除该会话，手机端的验证码流程会自行超时。确定吗？');
+async function dropSess(row, id, btn) {
+  // 真正放弃：后端 pop 掉会话并关闭连接，该号码可立即重新发码。
+  // 原来只删前端那一行，会话在后端挂满 10 分钟，同号再发码会被并发守卫拦住，
+  // 刷新页面它又回来 —— 用户只能干等超时。
+  const ok = await confirmDialog('放弃会话', '会话将立即作废，已发出的验证码不再可用；该号码可以马上重新发码。确定吗？', { danger: true });
   if (!ok) return;
-  row.remove();
-  if (!$('#regSessions .reg-sess', root)) renderSessions([]);
+  btn.disabled = true;
+  try {
+    const r = await apiFetch('/api/register/cancel', { method: 'POST', body: { session_id: id } });
+    toast(r.found === false ? '会话已过期，已从列表移除' : `已放弃 ${r.phone || ''} 的会话`, 'ok');
+    row.remove();
+    if (!$('#regSessions .reg-sess', root)) renderSessions([]);
+  } catch (e) {
+    toast(e.message || '放弃失败', 'err');
+    btn.disabled = false;
+  }
+}
+
+/** 会话剩余秒数 → 「9 分 30 秒」；后端 expires_in 已钳到 >= 0 */
+function fmtLeft(sec) {
+  const s = Math.max(0, Math.round(Number(sec) || 0));
+  if (s < 60) return `${s} 秒`;
+  const m = Math.floor(s / 60), r = s % 60;
+  return r ? `${m} 分 ${r} 秒` : `${m} 分钟`;
 }
 
 /* ---------------- 工具 ---------------- */

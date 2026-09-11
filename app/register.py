@@ -301,6 +301,36 @@ class Registrar:
                     s.close()
         return result
 
+    # ---------------- 主动放弃 ----------------
+    def cancel(self, session_id: str, origin: str = "") -> dict[str, Any]:
+        """主动放弃一个等码会话：从字典移除并关闭连接。
+
+        原来没有这个入口：面板「放弃」只删前端那一行，会话在这里挂满
+        SESSION_TTL（10 分钟），期间同号并发守卫会拦住这个号再次发码，
+        刷新页面那条会话又冒出来 —— 用户只能干等超时。
+
+        幂等：会话已过期/已完成时也返回 ok（found=False），调用方要的终态
+        「没有这个会话」已经成立，不该报错。origin 非空时只允许放弃该来源的
+        会话 —— 手动注册页不能误杀自动任务派生的会话，否则跑着的任务要到
+        提交验证码那一步才发现会话没了。
+        """
+        self._gc()
+        with self._lock:
+            sess = self._sessions.get(session_id)
+            if sess and origin and sess.origin != origin:
+                who = "自动注册任务" if sess.origin == "auto" else sess.origin
+                return {"ok": False, "session_id": session_id,
+                        "error": f"该会话由{who}创建，请到对应任务上停止，不能在这里放弃"}
+            sess = self._sessions.pop(session_id, None)
+        if not sess:
+            return {"ok": True, "found": False, "session_id": session_id,
+                    "message": "会话已过期或已结束"}
+        sess.note("会话被主动放弃")
+        sess.close()
+        return {"ok": True, "found": True, "session_id": session_id,
+                "phone": sess.phone, "origin": sess.origin,
+                "message": "已放弃会话，该号码可立即重新发码"}
+
     def sessions(self, origin: str = "") -> list[dict[str, Any]]:
         """origin 为空 = 全部；否则只回该来源的会话。
 

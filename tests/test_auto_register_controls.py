@@ -23,16 +23,24 @@ class FakeRegistrar:
     # 隔离出手动注册页）。少一个 origin 参数会抛 TypeError，被 _run 的
     # except 吞掉 → 任务在「发码」阶段就失败，get_sms 压根不会被调用，
     # 于是等码相关的断言全部落空。
+    def __init__(self) -> None:
+        self.cancelled: list[str] = []
+
     def start(self, phone: str, origin: str = "manual") -> dict:
         return {"ok": True, "session_id": "session", "proxy": "direct"}
 
     def finish(self, session_id: str, code: str, label: str = "", invite_code: str = "") -> dict:
         return {"ok": True, "masked": "138****8000", "credits": 100}
 
+    def cancel(self, session_id: str, origin: str = "") -> dict:
+        self.cancelled.append(session_id)
+        return {"ok": True, "found": True, "session_id": session_id}
+
 
 class AutoRegisterControlsTest(unittest.TestCase):
     def setUp(self) -> None:
-        self.registrar = ar.AutoRegistrar(cast(Any, FakeRegistrar()), "test-token")
+        self.fake_registrar = FakeRegistrar()
+        self.registrar = ar.AutoRegistrar(cast(Any, self.fake_registrar), "test-token")
 
     def test_timeout_constant_is_150_seconds(self) -> None:
         self.assertEqual(ar.TASK_TIMEOUT, 150)
@@ -127,6 +135,26 @@ class AutoRegisterControlsTest(unittest.TestCase):
             self.assertEqual(len(sms_timeouts), 1)
             self.assertGreaterEqual(sms_timeouts[0], 1)
             self.assertLessEqual(sms_timeouts[0], 150)
+            # 等码失败 = 任务没成功，发码时派生的注册会话必须被收掉，
+            # 否则它在 Registrar 里挂满 10 分钟，同号一直「有进行中的会话」。
+            self.assertEqual(self.fake_registrar.cancelled, ["session"])
+
+    def test_successful_task_does_not_cancel_session(self) -> None:
+        """成功路径 finish() 自己 pop 会话，不该再调 cancel（避免多余的一次 gc/锁）"""
+        with patch.object(ar.uum, "get_phone", return_value={"ok": True, "phone": "13800138000"}), \
+             patch.object(ar.uum, "get_sms", return_value={"ok": True, "code": "123456", "raw": "码 123456"}), \
+             patch.object(ar.uum, "release", return_value="ok"):
+            started = self.registrar.start()
+            task_id = started["task_ids"][0]
+            task = None
+            for _ in range(200):
+                task = self.registrar.get(task_id)
+                if task and task["status"] in ar.TERMINAL_STATUSES:
+                    break
+                time.sleep(0.01)
+            assert task is not None
+            self.assertEqual(task["status"], "done", task)
+            self.assertEqual(self.fake_registrar.cancelled, [])
 
 
 if __name__ == "__main__":

@@ -1567,6 +1567,23 @@ async def api_reg_finish(request: Request) -> dict[str, Any]:
     return res
 
 
+@app.post("/api/register/cancel", dependencies=[Depends(require_admin)])
+async def api_reg_cancel(request: Request) -> dict[str, Any]:
+    """放弃一个等码会话，让号码立刻可以重新发码（不必等 10 分钟超时）。
+
+    默认只放弃手动会话；自动任务派生的会话要在任务上停止，
+    传 force=true 才允许直接放弃。
+    """
+    b = await request.json()
+    sid = str(b.get("session_id") or "").strip()
+    if not sid:
+        return JSONResponse({"ok": False, "error": "session_id 为空"}, status_code=400)
+    res = registrar.cancel(sid, origin="" if b.get("force") else "manual")
+    if not res.get("ok"):
+        return JSONResponse(res, status_code=400)
+    return res
+
+
 @app.get("/api/register/sessions", dependencies=[Depends(require_admin)])
 def api_reg_sessions(all: bool = False) -> dict[str, Any]:
     # 自动注册任务内部也会创建 RegisterSession。默认只回手动会话，

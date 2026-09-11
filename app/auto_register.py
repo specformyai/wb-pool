@@ -296,6 +296,7 @@ class AutoRegistrar:
     def _run(self, task: AutoRegTask) -> None:
         task.status = "running"
         phone = None
+        session_id = None
         timeout_timer = threading.Timer(task.remaining(), self._expire, args=(task,))
         timeout_timer.daemon = True
         timeout_timer.start()
@@ -453,6 +454,16 @@ class AutoRegistrar:
                         pass
         finally:
             timeout_timer.cancel()
+            # 任务没走到成功，派生的注册会话必须一起收掉：否则它会在 Registrar
+            # 里挂满 10 分钟，同号守卫让这个号一直显示「有进行中的会话」。
+            # 成功路径 finish() 已经把会话 pop 掉，cancel 幂等返回 found=False。
+            if session_id and task.status != "done":
+                cancel = getattr(self.registrar, "cancel", None)
+                if cancel:
+                    try:
+                        cancel(session_id)
+                    except Exception:  # noqa: BLE001
+                        pass
             # 占用释放的唯一出口：超时 / 停止 / 异常 / 成功全部经过这里。
             # 用 task.claimed_phone 而不是局部 phone —— 后者在各分支被置 None。
             self._unclaim(task.claimed_phone)
