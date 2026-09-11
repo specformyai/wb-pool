@@ -375,6 +375,24 @@ def _sse(obj: Any) -> str:
     return f"data: {json.dumps(obj, ensure_ascii=False)}\n\n"
 
 
+def _tries_headers(acc: Account | None, tried: list[str]) -> dict[str, str]:
+    """重试过程对客户端可见：排障时一眼看出「是号坏了」还是「上游坏了」。
+
+    X-WB-Tries     = 本次请求一共取过几个号（含最终成功的那个）
+    X-WB-Swapped   = 中途换掉的号（masked，逗号分隔），没换过就不给
+    X-WB-Account   = 最终服务的号；全部失败时没有
+    """
+    h: dict[str, str] = {"X-WB-Tries": str(max(1, len(tried)))}
+    if acc is not None:
+        h["X-WB-Account"] = acc.masked()
+        swapped = [m for m in tried if m != acc.masked()]
+    else:
+        swapped = list(tried)
+    if swapped:
+        h["X-WB-Swapped"] = ",".join(swapped)
+    return h
+
+
 def _pick_account(force_key: str | None = None) -> Account:
     if force_key:
         acc, err = pool.acquire_specific(force_key, proxy=pm.pick())
@@ -520,7 +538,7 @@ async def chat_completions(request: Request) -> Any:
             return StreamingResponse(event_stream(), media_type="text/event-stream",
                                      headers={"Cache-Control": "no-cache",
                                               "X-Accel-Buffering": "no",
-                                              "X-WB-Account": acc.masked()})
+                                              **_tries_headers(acc, tried)})
 
         # 非流式：聚合上游流
         content, reasoning, usage, finish, tool_calls = "", "", None, "stop", []
@@ -550,9 +568,10 @@ async def chat_completions(request: Request) -> Any:
             "id": cid, "object": "chat.completion", "created": created, "model": model,
             "choices": [{"index": 0, "message": msg, "finish_reason": finish or "stop"}],
             "usage": usage or {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
-        }, headers={"X-WB-Account": acc.masked()})
+        }, headers=_tries_headers(acc, tried))
 
-    raise HTTPException(502, f"全部账号均失败，最后错误: {last_err}")
+    raise HTTPException(502, f"全部账号均失败，最后错误: {last_err}",
+                        headers=_tries_headers(None, tried))
 
 
 def _chain(first: Any, gen: Iterator[Any]) -> Iterator[Any]:
@@ -783,6 +802,31 @@ def _anthropic_stop_reason(finish: str | None, has_tools: bool = False) -> str:
     }.get(finish or "stop", "end_turn")
 
 
+def _anthropic_usage(usage: dict[str, Any] | None) -> dict[str, int]:
+    """把上游（OpenAI 口径）的 usage 换成 Anthropic 口径。
+
+    Anthropic 的 input_tokens **不含**缓存命中部分，命中的走 cache_read_input_tokens；
+    直接把 prompt_tokens 整个塞进 input_tokens 会让客户端账本比真实计费虚高。
+    上游有两种写法：顶层 prompt_cache_hit_tokens（DeepSeek 系）或
+    prompt_tokens_details.cached_tokens（OpenAI 系），两种都认。没缓存字段时
+    退化成原来的映射，数字不变。
+    """
+    u = usage or {}
+    prompt = int(u.get("prompt_tokens") or 0)
+    details = u.get("prompt_tokens_details") if isinstance(u.get("prompt_tokens_details"), dict) else {}
+    cached = int(u.get("cached_tokens") or u.get("prompt_cache_hit_tokens")
+                 or (details or {}).get("cached_tokens") or 0)
+    cached = max(0, min(cached, prompt))
+    out = {
+        "input_tokens": prompt - cached,
+        "output_tokens": int(u.get("completion_tokens") or 0),
+    }
+    if cached:
+        out["cache_read_input_tokens"] = cached
+        out["cache_creation_input_tokens"] = 0
+    return out
+
+
 def _anthropic_event(event: dict[str, Any]) -> str:
     return (f"event: {event['type']}\n"
             f"data: {json.dumps(event, ensure_ascii=False)}\n\n")
@@ -959,7 +1003,7 @@ async def anthropic_messages(request: Request) -> Any:
                     "type": "message_delta",
                     "delta": {"stop_reason": _anthropic_stop_reason(
                         finish, bool(tool_calls)), "stop_sequence": None},
-                    "usage": {"output_tokens": (usage or {}).get("completion_tokens", 0)},
+                    "usage": _anthropic_usage(usage),
                 })
                 yield _anthropic_event({"type": "message_stop"})
             except Exception as exc:  # noqa: BLE001
@@ -992,7 +1036,7 @@ async def anthropic_messages(request: Request) -> Any:
         return StreamingResponse(a_stream(), media_type="text/event-stream",
                                  headers={"Cache-Control": "no-cache",
                                           "X-Accel-Buffering": "no",
-                                          "X-WB-Account": acc.masked()})
+                                          **_tries_headers(acc, [acc.masked()])})
 
     try:
         text, _reasoning, usage, finish, tool_calls = await asyncio.to_thread(
@@ -1032,8 +1076,7 @@ async def anthropic_messages(request: Request) -> Any:
         "content": content_blocks,
         "stop_reason": _anthropic_stop_reason(finish, bool(tool_calls)),
         "stop_sequence": None,
-        "usage": {"input_tokens": (usage or {}).get("prompt_tokens", 0),
-                  "output_tokens": (usage or {}).get("completion_tokens", 0)},
+        "usage": _anthropic_usage(usage),
     }
 
 
@@ -1377,6 +1420,10 @@ def get_pool() -> dict[str, Any]:
                                     if a.credits_expire_at else None),
             "expires_at": a.expires_at, "expires_in_h": round(a.expires_in() / 3600, 1),
             "cooldown_until": a.cooldown_until,
+            # 余额刷新连续超时/出错的次数与最近一次时间（面板据此标「异常」，
+            # 不影响调度：余额查不到不等于号坏了，只是提醒人看一眼）
+            "balance_fail_count": a.balance_fail_count,
+            "balance_fail_at": a.balance_fail_at,
         })
     return {"stats": pool.stats(), "accounts": accs}
 

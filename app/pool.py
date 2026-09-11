@@ -81,6 +81,9 @@ def classify_error(err: str) -> str:
 
 AUTH_FAIL_LIMIT = int(os.environ.get("WB_AUTH_FAIL_LIMIT", "2"))
 EXHAUST_COOLDOWN = 12 * 3600      # 配额耗尽冷却 12h（上游按自然日重置，双次重试窗口）
+# 定时余额刷新里单个号的硬超时（秒）。串行刷新下一个卡 30s×3 次重试就是一分半，
+# 36 个号全卡就是整轮拖到下一轮都没跑完。15s 已经远超正常 RTT。
+BALANCE_TIMEOUT = float(os.environ.get("WB_BALANCE_TIMEOUT", "15"))
 REFRESH_AHEAD = 3600              # 过期前 1h 主动刷新
 
 
@@ -131,6 +134,11 @@ class Account:
     credits_expiring: float = 0.0        # 72h 内到期且还有余额的额度
     credits_expired: float = 0.0         # 已作废但上游仍列在包里的额度
     credits_expire_at: int = 0           # 最快到期的有余额包的到期时刻（ms）
+    # 余额刷新异常留痕（2026-09-11 加）。定时刷新是串行的（并发会被上游风控），
+    # 一个号超时会拖住整轮；现在每个号有硬超时，超时/报错就 +1 并记时间，
+    # 成功一次清零。只做标签给面板看，**不改 status、不影响调度**。
+    balance_fail_count: int = 0
+    balance_fail_at: float = 0.0
     note: str = ""
 
     def checkin_settled(self, today: str) -> bool:
@@ -427,7 +435,8 @@ class AccountPool:
 
     def refresh_balance(self, acc: Account,
                         proxy: str | None = None,
-                        retries: int = 2) -> dict[str, Any]:
+                        retries: int = 2,
+                        timeout: float = 30.0) -> dict[str, Any]:
         """刷新**单个**账号余额并落库，返回上游 bal dict。
 
         原先只有复数版 refresh_balances()，而 main.py 的 api_invite_bind
@@ -435,14 +444,16 @@ class AccountPool:
         """
         if not acc.access_token:
             return {"total": -1.0, "error": "no access_token"}
-        bal = upstream.get_balance(acc.access_token, proxy=proxy, retries=retries)
+        bal = upstream.get_balance(acc.access_token, proxy=proxy, retries=retries,
+                                   timeout=timeout)
         # 代理链路故障：拉黑该出口换一个再试，不污染账号 last_error
         if bal.get("total", -1) < 0 and is_proxy_error(bal.get("error")) \
                 and self.proxy_mgr:
             if proxy:
                 self.proxy_mgr.mark_bad(proxy)
             proxy = self.proxy_mgr.pick()
-            bal = upstream.get_balance(acc.access_token, proxy=proxy, retries=retries)
+            bal = upstream.get_balance(acc.access_token, proxy=proxy, retries=retries,
+                                       timeout=timeout)
         with self._lock:
             if bal.get("total", -1) >= 0:
                 acc.credits_total = bal["total"]
@@ -507,14 +518,34 @@ class AccountPool:
         return acc
 
     def refresh_balances(self, proxy: str | None = None) -> list[dict[str, Any]]:
+        """逐个刷新余额。**刻意串行**：并发打上游余额接口会触发风控。
+
+        每个号带硬超时（BALANCE_TIMEOUT，默认 15s，重试 1 次），超时或报错
+        只在账号上记 balance_fail_count / balance_fail_at 供面板标「异常」，
+        不改 status —— 余额查不到不等于号不能用。
+        """
         out = []
         for acc in self.all():
             if not acc.access_token:
                 continue
-            bal = self.refresh_balance(acc, proxy=proxy, retries=2)
+            if acc.status in ("dead", "disabled"):
+                # 停用/封号的不刷：省一次 RTT，也少一次被风控盯上的机会
+                continue
+            bal = self.refresh_balance(acc, proxy=proxy, retries=2,
+                                       timeout=BALANCE_TIMEOUT)
+            with self._lock:
+                if bal.get("total", -1) >= 0:
+                    acc.balance_fail_count = 0
+                    acc.balance_fail_at = 0.0
+                else:
+                    # 超时也算：用户要的就是「超时就打标签」。链路类错误（代理挂了）
+                    # 同样计数 —— 标签只是提醒人看，不参与调度，宁可多标不漏标。
+                    acc.balance_fail_count += 1
+                    acc.balance_fail_at = time.time()
             out.append({"phone": acc.phone, "masked": acc.masked(),
                         "total": bal.get("total"), "packages": bal.get("packages", []),
-                        "error": bal.get("error")})
+                        "error": bal.get("error"),
+                        "balance_fail_count": acc.balance_fail_count})
         self.save()
         return out
 

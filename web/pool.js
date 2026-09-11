@@ -89,6 +89,9 @@ function normalizeAccount(raw, idx) {
     // ?? 而非 || ：false 是有效值，用 || 会在「确实不是今天」时错误回退。
     grantToday: raw.daily_grant_today ?? (String(raw.daily_grant_date ?? '') === todayStr()),
     streak: Number(raw.last_checkin_streak ?? 0) || 0,
+    // 余额刷新连续失败次数（后端 refresh_balances 记的）。>0 就在状态旁标「余额异常」，
+    // 只是提醒，不改变状态分类 —— 余额查不到不等于号不能用。
+    balanceFails: Number(raw.balance_fail_count ?? 0) || 0,
     packages: fmtPackages(raw.packages ?? raw.package),
     maxBal: 1, balTier: 'none', // 统一在 loadPool 中计算
   };
@@ -165,7 +168,9 @@ function expHtml(a) {
 }
 function statusHtml(a) {
   const expiredBadge = (a.hours != null && a.hours <= 0) ? '<span class="pill st-bad mini">Token 过期</span>' : '';
-  return `<span class="pill st-${a.statusKey}"><span class="pill-dot"></span>${escapeHtml(a.statusText)}</span>${expiredBadge}`;
+  const balBadge = a.balanceFails > 0
+    ? `<span class="pill st-depleted mini" title="余额刷新连续失败 ${a.balanceFails} 次（超时/上游报错），不影响调度">余额异常 ×${a.balanceFails}</span>` : '';
+  return `<span class="pill st-${a.statusKey}"><span class="pill-dot"></span>${escapeHtml(a.statusText)}</span>${expiredBadge}${balBadge}`;
 }
 function opsHtml(a, withText = false) {
   const dis = a.phone ? '' : 'disabled';

@@ -127,9 +127,10 @@ with (tmp / "e.jsonl").open("w", encoding="utf-8") as f:
     f.write(json.dumps({"ts": now - 10 * 86400, "model": "m"}) + "\n")
     f.write(json.dumps({"ts": now, "model": "m"}) + "\n")
 cl5.prune()
-raw_lines = [l for l in (tmp / "e.jsonl").read_text().splitlines() if l.strip()]
-check("坏行被保留（不静默丢数据）", sum(1 for l in raw_lines if "不是 json" in l), 1)
-check("过期行仍被删", len(raw_lines), 2)
+# 存储已换 SQLite：坏行不再留在文件里，而是计入 stats()["legacy_bad"]（不静默丢）
+st5 = cl5.stats()
+check("坏行被计数（不静默丢数据）", st5["legacy_bad"], 1)
+check("过期行仍被删", st5["rows"], 1)
 
 # =========================================================== 4. 时间分组
 print("\n[4] 时间分组 range_since")

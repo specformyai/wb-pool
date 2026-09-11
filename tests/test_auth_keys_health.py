@@ -182,8 +182,9 @@ with TestClient(app) as c:
     now = time.time()
     def seed(model, ok, n, ago_step, ms=800, err="", offset=0.0, ttft=0, tps=0.0,
              acct="+861****0001"):
-        # 直接写 jsonl 才能造历史时间戳（record() 用的是当前时间）
-        with open(CLOG.path, "a", encoding="utf-8") as f:
+        # 直接写 jsonl 才能造历史时间戳（record() 用的是当前时间）。
+        # 存储已换 SQLite：往 legacy_path（旧 jsonl 路径）追加，CallLog 下次读写时自动并入。
+        with open(CLOG.legacy_path, "a", encoding="utf-8") as f:
             for i in range(n):
                 f.write(json.dumps({
                     "ts": round(now - offset - ago_step * i, 3), "model": model, "ok": ok,
