@@ -142,30 +142,41 @@ class WebAuth:
         for t in dead:
             self._sessions.pop(t, None)
 
-    def lock_left(self, user: str) -> int:
-        """该用户还要锁多少秒（0 = 没锁）。"""
+    def lock_left(self, user: str, ip: str = "") -> int:
+        """该用户（从这个 IP）还要锁多少秒（0 = 没锁）。"""
         with self._lock:
-            f = self._fails.get((user or "").strip())
+            f = self._fails.get(self._fail_key(user, ip))
             if not f:
                 return 0
             left = f.get("until", 0) - time.time()
             return int(left) if left > 0 else 0
 
-    def login(self, user: str, password: str, ua: str = "") -> str | None:
+    @staticmethod
+    def _fail_key(user: str, ip: str) -> str:
+        # 失败计数按「用户 + 来源 IP」分桶。只按用户分桶的话，任何人对着 admin
+        # 连错 8 次就能把真管理员锁在外面 —— 防撞库反而变成了拒绝服务开关。
+        return f"{(user or '').strip()}@{(ip or '').strip() or '-'}"
+
+    def login(self, user: str, password: str, ua: str = "", ip: str = "") -> str | None:
         user = (user or "").strip()
-        if self.lock_left(user):
+        if self.lock_left(user, ip):
             return None
         if not self.check(user, password):
             with self._lock:
-                f = self._fails.setdefault(user, {"n": 0, "until": 0.0})
+                f = self._fails.setdefault(self._fail_key(user, ip), {"n": 0, "until": 0.0})
                 f["n"] += 1
                 if f["n"] >= MAX_FAILS:
                     f["until"] = time.time() + LOCK_SECONDS
                     f["n"] = 0
+                # 桶别无限长：清掉已经过了锁定期且没再失败的旧桶
+                now = time.time()
+                for k in [k for k, v in self._fails.items()
+                          if v.get("until", 0) < now - LOCK_SECONDS and v.get("n", 0) == 0]:
+                    self._fails.pop(k, None)
             return None
         tok = secrets.token_urlsafe(32)
         with self._lock:
-            self._fails.pop(user, None)
+            self._fails.pop(self._fail_key(user, ip), None)
             self._gc()
             self._sessions[tok] = {"user": user, "exp": time.time() + SESSION_TTL,
                                    "created": time.time(), "ua": (ua or "")[:120]}

@@ -12,6 +12,7 @@ wb-pool —— WorkBuddy/CodeBuddy 账号池反向代理
 from __future__ import annotations
 
 import asyncio
+import hmac
 import json
 import os
 import time
@@ -22,6 +23,7 @@ from typing import Any, AsyncIterator, Iterator
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
 from fastapi import Cookie, Depends, FastAPI, Header, HTTPException, Request, Response
+from fastapi.openapi.docs import get_swagger_ui_html
 from fastapi.responses import (HTMLResponse, JSONResponse, RedirectResponse,
                                StreamingResponse)
 from fastapi.staticfiles import StaticFiles
@@ -188,7 +190,11 @@ def _apply_settings(changed: dict[str, Any]) -> None:
 
 settings.on_change(_apply_settings)
 
-app = FastAPI(title="wb-pool", version="1.1.0", docs_url="/api/docs", redoc_url=None)
+# 自带的 /api/docs 与 openapi.json 不挂鉴权，等于把整张管理 API 清单挂在公网。
+# 这里关掉默认路由，鉴权段之后用 require_admin 重新挂一遍（登录后仍可看文档）。
+app = FastAPI(title="wb-pool", version="1.1.0",
+              docs_url=None, redoc_url=None, openapi_url=None)
+_OPENAPI_PATH = "/api/openapi.json"
 
 
 # --------------------------------------------------------------------------- #
@@ -200,6 +206,26 @@ def _extract_key(authorization: str | None, x_api_key: str | None) -> str:
     if authorization and authorization.lower().startswith("bearer "):
         return authorization[7:].strip()
     return (x_api_key or "").strip()
+
+
+def _is_admin_key(key: str) -> bool:
+    """ADMIN_KEY 比对统一走常数时间比较，别在各处手写 ==。
+
+    ADMIN_KEY 为空表示「没有脚本用的根凭据」，任何 key 都不算数。
+    """
+    return bool(ADMIN_KEY) and hmac.compare_digest(key or "", ADMIN_KEY)
+
+
+def _client_ip(request: Request) -> str:
+    """真实客户端 IP：经反代时取 X-Forwarded-For 第一段，否则取对端地址。
+
+    只用来给登录失败计数分桶（同一个 IP 连错才锁），伪造它顶多把自己换个桶，
+    换不来别人的登录态，所以这里不必校验反代是否可信。
+    """
+    xf = (request.headers.get("x-forwarded-for") or "").split(",")[0].strip()
+    if xf:
+        return xf[:64]
+    return (request.client.host if request.client else "") or "-"
 
 
 def require_api(request: Request,
@@ -220,9 +246,35 @@ def require_admin(authorization: str | None = Header(None),
     s = webauth.session(wb_session or "")
     if s:
         return s["user"]
-    if ADMIN_KEY and _extract_key(authorization, x_api_key) == ADMIN_KEY:
+    if _is_admin_key(_extract_key(authorization, x_api_key)):
         return "admin-key"
     raise HTTPException(401, "未登录")
+
+
+@app.get("/api/docs", include_in_schema=False, dependencies=[Depends(require_admin)])
+def api_docs() -> Any:
+    return get_swagger_ui_html(openapi_url=_OPENAPI_PATH, title="wb-pool API")
+
+
+@app.get(_OPENAPI_PATH, include_in_schema=False, dependencies=[Depends(require_admin)])
+def api_openapi() -> Any:
+    return JSONResponse(app.openapi())
+
+
+@app.middleware("http")
+async def security_headers(request: Request, call_next):  # type: ignore[no-untyped-def]
+    """基础安全头。HSTS 留给前面的 TLS 反代加：服务本身跑 HTTP，加了没意义。
+
+    不写完整 CSP：index.html 有内联 importmap 与启动脚本，贸然上 CSP 会把
+    整个面板白屏。只用 frame-ancestors 防点击劫持，这条不影响任何内联资源。
+    """
+    resp = await call_next(request)
+    h = resp.headers
+    h.setdefault("X-Content-Type-Options", "nosniff")
+    h.setdefault("X-Frame-Options", "DENY")
+    h.setdefault("Referrer-Policy", "same-origin")
+    h.setdefault("Content-Security-Policy", "frame-ancestors 'none'")
+    return resp
 
 
 def _sse_data(obj: Any) -> str:
@@ -346,10 +398,16 @@ async def chat_completions(request: Request) -> Any:
     payload = {k: v for k, v in body.items() if k not in ("stream", "stream_options")}
     payload["model"] = model
 
+    # 两个调试头只认管理路由（/api/chat/completions，require_admin 已过）。
+    # /v1/* 是分发给使用者的反代口，若也认这两个头，任何拿反代 key 的人都能
+    # 指定账号、按报错探测号码存不存在 —— 那是管理员才该有的能力。
+    is_admin_route = request.url.path.startswith("/api/")
+
     # WebUI 调试请求带这个头；限制上游无数据等待，避免一个坏连接永久占住账号。
     # 普通 API 调用继续保留原来的 300 秒上限，不擅自缩短外部客户端长回答。
     upstream_timeout = 300.0
-    raw_timeout = (request.headers.get("X-WB-Debug-Timeout") or "").strip()
+    raw_timeout = ((request.headers.get("X-WB-Debug-Timeout") or "").strip()
+                   if is_admin_route else "")
     is_debug_request = bool(raw_timeout)
     if raw_timeout:
         try:
@@ -358,7 +416,8 @@ async def chat_completions(request: Request) -> Any:
             upstream_timeout = 120.0
 
     # X-WB-Force-Account: 手机号或 masked，调试时指定账号
-    force_key = (request.headers.get("X-WB-Force-Account") or "").strip() or None
+    force_key = ((request.headers.get("X-WB-Force-Account") or "").strip() or None
+                 if is_admin_route else None)
 
     last_err: str | None = None
     tried: list[str] = []
@@ -778,8 +837,10 @@ async def anthropic_messages(request: Request) -> Any:
     if disable_parallel is not None:
         payload["parallel_tool_calls"] = not bool(disable_parallel)
 
+    # /v1/messages 是分发给使用者的口，指定账号的调试头只认管理路由（见 chat_completions）
     acc = _pick_account(
         (request.headers.get("X-WB-Force-Account") or "").strip() or None
+        if request.url.path.startswith("/api/") else None
     )
     proxy = pm.pick()
     mid = f"msg_{uuid.uuid4().hex[:24]}"
@@ -985,8 +1046,8 @@ def health(wb_session: str | None = Cookie(None, alias=COOKIE_NAME),
            x_api_key: str | None = Header(None, alias="x-api-key")) -> dict[str, Any]:
     """存活探针公开；账号数/积分这些只在已登录时给，避免裸奔泄露池子规模。"""
     base = {"ok": True, "time": time.strftime("%Y-%m-%d %H:%M:%S")}
-    authed = bool(webauth.session(wb_session or "")) or (
-        bool(ADMIN_KEY) and _extract_key(authorization, x_api_key) == ADMIN_KEY)
+    authed = bool(webauth.session(wb_session or "")) or \
+        _is_admin_key(_extract_key(authorization, x_api_key))
     if not authed:
         return {**base, "authed": False}
     return {**base, "authed": True, "stats": pool.stats(), "proxy_mode": pm.mode,
@@ -1028,7 +1089,8 @@ async def auth_login(request: Request, response: Response) -> dict[str, Any]:
     body = await request.json()
     user = str(body.get("user") or "").strip()
     pwd = str(body.get("password") or "")
-    tok = webauth.login(user, pwd, ua=request.headers.get("user-agent", ""))
+    tok = webauth.login(user, pwd, ua=request.headers.get("user-agent", ""),
+                        ip=_client_ip(request))
     if not tok:
         raise HTTPException(401, "用户名或密码不对")
     response.set_cookie(COOKIE_NAME, tok, max_age=SESSION_TTL, httponly=True,
@@ -1251,7 +1313,7 @@ async def api_calls_stream(request: Request,
     版本没变就什么都不发 —— 这是「省流量」的关键，客户端不再每 15s 全量拉一次。
     """
     s = webauth.session(wb_session or "")
-    if not s and not (ADMIN_KEY and _extract_key(authorization, x_api_key) == ADMIN_KEY):
+    if not s and not _is_admin_key(_extract_key(authorization, x_api_key)):
         raise HTTPException(401, "未登录")
 
     async def gen():
@@ -1938,28 +2000,6 @@ def api_models_cache_status() -> dict[str, Any]:
 # --------------------------------------------------------------------------- #
 
 # --------------------------------------------------------------------------- #
-# Admin API - 账号管理
-# --------------------------------------------------------------------------- #
-@app.get("/api/admin/accounts", dependencies=[Depends(require_admin)])
-def api_get_accounts() -> dict[str, Any]:
-    """获取所有账号信息（含积分、注册时间）"""
-    accounts_data = []
-    for acc in pool._accounts:
-        accounts_data.append({
-            "phone": acc.phone,
-            "points": acc.credits_total,
-            "status": acc.status,
-            "registered_at": acc.registered_at.isoformat() if acc.registered_at else None,
-            "expires_at": acc.expires_at.isoformat() if acc.expires_at else None,
-            "last_checkin": acc.last_checkin.isoformat() if acc.last_checkin else None,
-        })
-    
-    return {
-        "total": len(accounts_data),
-        "accounts": accounts_data,
-    }
-
-# --------------------------------------------------------------------------- #
 # 历史对话（上游用量流水里的 input 字段）
 # --------------------------------------------------------------------------- #
 @app.get("/api/history/accounts", dependencies=[Depends(require_admin)])
@@ -2059,11 +2099,9 @@ async def force_password_change(request: Request, call_next):  # type: ignore[no
 
     # 带对的 WB_ADMIN_KEY 就放行：那是环境变量里的根凭据，和「网页默认密码
     # 没改」是两件独立的事，不该顺带把脚本运维也锁死。
-    if ADMIN_KEY:
-        key = _extract_key(request.headers.get("authorization"),
-                           request.headers.get("x-api-key"))
-        if key == ADMIN_KEY:
-            return await call_next(request)
+    if _is_admin_key(_extract_key(request.headers.get("authorization"),
+                                  request.headers.get("x-api-key"))):
+        return await call_next(request)
 
     return JSONResponse(
         {"ok": False, "error": "首次使用必须修改默认密码", "need_password_change": True},
