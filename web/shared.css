@@ -48,6 +48,15 @@
   --r2: 14px;                               /* 卡片圆角，对齐 .stat 的 14px */
   --bg-1: #0d1420;                          /* = --bg-2 */
 
+  /* 滚动条：系统默认滚动条在深色底上是一条浅灰粗条，和整体风格冲突。
+   * 统一成半透明冷灰，hover 才加亮 —— 静止时几乎隐形，需要时看得见。
+   * 取值对齐 --line/--line-2（1px 描边同一套灰度），保证和卡片边框同调。 */
+  --sb-size: 10px;                          /* 主滚动条宽度 */
+  --sb-size-thin: 6px;                      /* 嵌套小区域用 */
+  --sb-thumb: rgba(148, 163, 184, 0.22);
+  --sb-thumb-hover: rgba(148, 163, 184, 0.42);
+  --sb-thumb-active: rgba(45, 212, 191, 0.55);   /* 拖动时点一下品牌色 */
+
   color-scheme: dark;
 }
 
@@ -62,6 +71,103 @@ html, body {
 }
 
 body { min-height: 100vh; }
+
+/* ---------------------------------------------------------------- 滚动条
+ *
+ * 两套语法都要写，缺一个就有浏览器落回系统默认：
+ *   · scrollbar-width / scrollbar-color —— 标准属性，Firefox 和新版 Chrome
+ *   · ::-webkit-scrollbar-*             —— WebKit/Blink 系
+ * 同时给两套时，WebKit 优先用伪元素，Firefox 用标准属性，各取所需。
+ *
+ * 作用域是 `*` 而不是只写 html/body：滚动条属性**不会**从祖先继承到
+ * 内部滚动容器上，只给 body 设的话侧栏、表格、消息区、模态框那 14 个
+ * overflow:auto 容器全都还是系统默认样式。
+ */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--sb-thumb) transparent;
+}
+
+*::-webkit-scrollbar {
+  width: var(--sb-size);
+  height: var(--sb-size);
+}
+*::-webkit-scrollbar-track {
+  background: transparent;
+}
+*::-webkit-scrollbar-thumb {
+  background: var(--sb-thumb);
+  border-radius: 999px;
+  /* 用透明边框把 thumb 往内缩，看着像一条细条悬在轨道里，
+   * 而不是贴满整个滚动槽。background-clip 让边框区域真透明。 */
+  border: 2px solid transparent;
+  background-clip: padding-box;
+}
+*::-webkit-scrollbar-thumb:hover {
+  background: var(--sb-thumb-hover);
+  background-clip: padding-box;
+}
+*::-webkit-scrollbar-thumb:active {
+  background: var(--sb-thumb-active);
+  background-clip: padding-box;
+}
+/* 横竖滚动条交汇的那个小方块，默认会画成浅色块 */
+*::-webkit-scrollbar-corner {
+  background: transparent;
+}
+
+/* 嵌套小区域用更细的条：10px 在一个 160px 高的框里显得很重。
+ *
+ * 直接绑到真实容器选择器上，**不用 .scroll-thin 这类需要改标记的钩子** ——
+ * CSS 里写一个没人引用的类名不会报错，只是静默失效，排查起来极费时间。
+ * 下面每个选择器都已在对应 CSS 里 grep 证实存在（10/10）：
+ *   .chat-think-body / .chat-side / .chat-msgs   chat.css
+ *   .reg-logs pre                                pages.css
+ *   .mh-err-full                                 health.css
+ *   .dd-list                                     dropdown.css
+ *   .pg-list / .pool-table-wrap                  pool.css
+ *   .hist-slist / .hist-msgs                     history.css
+ * 新增内部滚动容器时把选择器加进这个列表，别去加 class。 */
+.chat-think-body,
+.chat-side,
+.chat-msgs,
+.reg-logs pre,
+.mh-err-full,
+.dd-list,
+.pg-list,
+.pool-table-wrap,
+.hist-slist,
+.hist-msgs,
+.scroll-thin {
+  scrollbar-width: thin;
+}
+.chat-think-body::-webkit-scrollbar,
+.chat-side::-webkit-scrollbar,
+.chat-msgs::-webkit-scrollbar,
+.reg-logs pre::-webkit-scrollbar,
+.mh-err-full::-webkit-scrollbar,
+.dd-list::-webkit-scrollbar,
+.pg-list::-webkit-scrollbar,
+.pool-table-wrap::-webkit-scrollbar,
+.hist-slist::-webkit-scrollbar,
+.hist-msgs::-webkit-scrollbar,
+.scroll-thin::-webkit-scrollbar {
+  width: var(--sb-size-thin);
+  height: var(--sb-size-thin);
+}
+.chat-think-body::-webkit-scrollbar-thumb,
+.chat-side::-webkit-scrollbar-thumb,
+.chat-msgs::-webkit-scrollbar-thumb,
+.reg-logs pre::-webkit-scrollbar-thumb,
+.mh-err-full::-webkit-scrollbar-thumb,
+.dd-list::-webkit-scrollbar-thumb,
+.pg-list::-webkit-scrollbar-thumb,
+.pool-table-wrap::-webkit-scrollbar-thumb,
+.hist-slist::-webkit-scrollbar-thumb,
+.hist-msgs::-webkit-scrollbar-thumb,
+.scroll-thin::-webkit-scrollbar-thumb {
+  border-width: 1px;
+}
 
 /* ---------------------------------------------------------------- 布局外壳 */
 

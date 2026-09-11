@@ -10,6 +10,17 @@
 
 线程安全：每个自动注册任务独立运行，结果写入 _tasks 字典，
 WebUI 通过 /api/auto_register/status/<task_id> 轮询。
+
+号码去重（2026-09-11 加，此前完全没有）：
+  uoomsg 在并发下会把**同一个号发给多个请求** —— 实测一批任务里
+  两个任务拿到同一个 15xxxxxxxxx，4 个注册会话拿到同一个号。后果不只是
+  浪费：几个任务抢同一条短信，其中一个失败还会 block 掉正在被别人使用的
+  好号（连坐）。平台侧不保证独占，**必须由我们自己去重**。
+
+  三层排除，都在取号时通过 uum.get_phone(exclude=...) 生效：
+    ① _claimed     —— 本进程其它任务正在用的号（取号成功即占用，finally 释放）
+    ② _recent_fail —— 近期失败过的号，冷却 RECENT_FAIL_TTL 秒内不再取
+    ③ 池内已有账号 —— 含 disabled/dead，避免为已有号再花一次短信费
 """
 from __future__ import annotations
 
@@ -26,6 +37,10 @@ from .register import Registrar
 TASK_TTL = 3600
 TASK_TIMEOUT = 150
 TERMINAL_STATUSES = {"done", "failed", "stopped"}
+# 注册失败的号进冷却，避免立刻被重新取到再花一次短信费。
+# 不用 uoomsg 的 block：那是永久拉黑，而多数失败（验证码过期、被并发任务
+# 抢走短信、链路抖动）不是号码本身的问题 —— 见 _retire_phone。
+RECENT_FAIL_TTL = 3600.0
 
 
 def _strip_ts(line: str) -> str:
@@ -46,6 +61,9 @@ class AutoRegTask:
         self.result: dict[str, Any] = {}
         self.stop_flag = False           # 外部停止标志
         self.timeout_flag = False
+        # 本任务占用的号码。局部变量 phone 在各分支会被置 None（表示"已归还，
+        # 别再重复 release"），所以占用释放不能依赖它，必须独立记一份。
+        self.claimed_phone: str | None = None
 
     # status 包一层 property：终态时刻由 setter 统一记录。
     # `task.status = ...` 的赋值点散布在 _run / _expire / _finish_if_aborted 里共 10 处，
@@ -101,6 +119,10 @@ class AutoRegistrar:
         self.token = uoomsg_token
         self._tasks: dict[str, AutoRegTask] = {}
         self._lock = threading.Lock()
+        # 正在被本进程任务占用的号码（归一化后的 11 位）
+        self._claimed: set[str] = set()
+        # 近期失败的号码 → 失败时刻，冷却期内不再取
+        self._recent_fail: dict[str, float] = {}
 
     def _gc(self) -> None:
         with self._lock:
@@ -108,6 +130,79 @@ class AutoRegistrar:
                      if time.time() - t.created_at > TASK_TTL]
             for tid in stale:
                 del self._tasks[tid]
+
+    # ---------------- 号码占用与排除 ----------------
+
+    def _claim(self, phone: str) -> bool:
+        """占用号码。已被别的任务占用则返回 False（调用方应退回重取）。"""
+        key = uum._normalize(phone)
+        if not key:
+            return False
+        with self._lock:
+            if key in self._claimed:
+                return False
+            self._claimed.add(key)
+        return True
+
+    def _unclaim(self, phone: str | None) -> None:
+        """释放占用。幂等 —— 多条退出路径都会调它。"""
+        if not phone:
+            return
+        with self._lock:
+            self._claimed.discard(uum._normalize(phone))
+
+    def _mark_fail(self, phone: str | None) -> None:
+        with self._lock:
+            if phone:
+                self._recent_fail[uum._normalize(phone)] = time.time()
+            # 顺手清理过期条目，别让这个 dict 无限长
+            cutoff = time.time() - RECENT_FAIL_TTL
+            for k in [k for k, v in self._recent_fail.items() if v < cutoff]:
+                del self._recent_fail[k]
+
+    def _pool_phones(self) -> set[str]:
+        """池内已有账号的号码（含 disabled/dead）。
+
+        为已有号再注册一次会白花一次短信费，而且 pool.add() 会走 updated
+        分支覆盖 token —— 不是我们想在批量注册里发生的事。
+        """
+        try:
+            return {uum._normalize(a.phone) for a in self.registrar.pool.all()
+                    if a.phone}
+        except Exception:  # noqa: BLE001
+            return set()
+
+    def _exclude_set(self) -> set[str]:
+        """取号排除集合 = 其它任务占用 ∪ 近期失败（未过冷却）∪ 池内已有。"""
+        cutoff = time.time() - RECENT_FAIL_TTL
+        with self._lock:
+            claimed = set(self._claimed)
+            recent = {k for k, v in self._recent_fail.items() if v >= cutoff}
+        return claimed | recent | self._pool_phones()
+
+    def _retire_phone(self, task: AutoRegTask, phone: str, reason: str) -> None:
+        """注册失败后处置号码：默认释放 + 本地冷却，只在上游明确拒绝该号时拉黑。
+
+        原实现对「登录失败/验证码校验失败」一律 uum.block()，等于永久拉黑。
+        但这类失败的常见原因是验证码过期、短信被并发任务抢走、链路抖动 ——
+        号码本身没问题。2026-09-11 就因为提交了从 Cloudflare 拦截页刮出来的
+        假验证码，把一个好号拉黑了。
+        """
+        low = (reason or "").lower()
+        # 上游明确表示这个号不能用（号段不支持、被运营商拒收、风控拒绝该号）
+        number_rejected = any(k in reason for k in (
+            "手机号", "号码不", "不支持该", "号段")) or "invalid phone" in low
+        try:
+            if number_rejected:
+                uum.block(self.token, phone)
+                task.log(f"号码被上游拒绝，已拉黑: {reason[:80]}")
+            else:
+                uum.release(self.token, phone)
+                self._mark_fail(phone)
+                task.log(f"已释放号码并加入 {int(RECENT_FAIL_TTL)}s 冷却"
+                         f"（未拉黑：失败原因不指向号码本身）")
+        except Exception as exc:  # noqa: BLE001
+            task.log(f"处置号码失败: {exc}")
 
     def start(self, invite_code: str = "", label: str = "", count: int = 1) -> dict[str, Any]:
         """启动 count 个异步自动注册任务，立即返回 task_id 列表。"""
@@ -186,7 +281,14 @@ class AutoRegistrar:
         if phone:
             try:
                 uum.release(self.token, phone)
-                task.log("号码已释放")
+                # 进冷却。能走到这里的检查点都在发码之后，也就是这个号已经
+                # 白花过一次短信且没收到码 —— 立刻允许重取只会再花一次钱。
+                # 这条最初漏了，导致 150s 超时（最常见的失败路径）完全不进
+                # 冷却表：定时器置 stop_flag 后，get_sms 一返回就被这个函数
+                # 提前拦下，下面那个带 _mark_fail 的 sms-timeout 分支永远
+                # 走不到（2026-09-11 并发实测：排除数恒等于池内号数）。
+                self._mark_fail(phone)
+                task.log("号码已释放并加入冷却")
             except Exception as exc:  # noqa: BLE001
                 task.log(f"释放号码失败: {exc}")
         return True
@@ -202,14 +304,42 @@ class AutoRegistrar:
             if self._finish_if_aborted(task, None, "取号前"):
                 return
 
-            # 1. 取号
-            task.log("uoomsg 取号中（实卡过滤）…")
-            res = uum.get_phone(self.token)
+            # 1. 取号（排除：其它任务占用 / 近期失败 / 池内已有）
+            exclude = self._exclude_set()
+            task.log(f"uoomsg 取号中（实卡过滤，排除 {len(exclude)} 个已占用/已有号）…")
+            res = uum.get_phone(self.token, exclude=exclude)
             if res.get("ok"):
                 phone = res["phone"]
                 if res.get("skipped_virtual"):
                     task.log(f"跳过虚拟号: {res['skipped_virtual']}")
-                task.log(f"取到号码: {phone}")
+                if res.get("skipped_duplicate"):
+                    task.log(f"跳过重复号（已被占用或池内已有）: "
+                             f"{len(res['skipped_duplicate'])} 个")
+                if res.get("cf_blocked"):
+                    task.log(f"取号期间 {res['cf_blocked']} 次 Cloudflare 拦截，已重试")
+                # 占用：平台可能在两次调用之间把同一个号发给别的任务，
+                # exclude 是取号那一刻的快照，claim 才是真正的互斥。
+                if not self._claim(phone):
+                    task.log(f"号码 {phone} 已被其它任务占用，释放并重取")
+                    try:
+                        uum.release(self.token, phone)
+                    except Exception:  # noqa: BLE001
+                        pass
+                    phone = None
+                    res = uum.get_phone(self.token, exclude=self._exclude_set())
+                    if res.get("ok"):
+                        phone = res["phone"]
+                        if not self._claim(phone):
+                            try:
+                                uum.release(self.token, phone)
+                            except Exception:  # noqa: BLE001
+                                pass
+                            phone = None
+                            res = {"ok": False,
+                                   "error": "连续取到已被占用的号码，稍后重试"}
+                if phone:
+                    task.claimed_phone = phone
+                    task.log(f"取到号码: {phone}")
 
             # 检查点：取号返回后。即使迟到结果是失败，也不能覆盖超时终态。
             if self._finish_if_aborted(task, phone, "取号后"):
@@ -234,8 +364,8 @@ class AutoRegistrar:
                 return
             if not reg_res.get("ok"):
                 err = reg_res.get("error", "发码失败")
-                task.log(f"发码失败: {err}，拉黑该号")
-                uum.block(self.token, phone)
+                task.log(f"发码失败: {err}")
+                self._retire_phone(task, phone, err)
                 phone = None
                 task.status = "failed"
                 task.result = {"error": err, "log": reg_res.get("log", [])}
@@ -258,6 +388,8 @@ class AutoRegistrar:
             if not sms_res["ok"]:
                 task.log(f"等码超时: {sms_res['error']}，释放号码")
                 uum.release(self.token, phone)
+                # 加冷却：这个号刚发过一条短信没收到，立刻重取只会再花一次钱
+                self._mark_fail(phone)
                 phone = None
                 task.status = "failed"
                 task.result = {"error": sms_res["error"]}
@@ -280,8 +412,8 @@ class AutoRegistrar:
                 return
             if not fin.get("ok"):
                 err = fin.get("error", "登录失败")
-                task.log(f"登录失败: {err}，拉黑号码")
-                uum.block(self.token, phone)
+                task.log(f"登录失败: {err}")
+                self._retire_phone(task, phone, err)
                 phone = None
                 task.status = "failed"
                 task.result = {"error": err, "log": fin.get("log", [])}
@@ -321,3 +453,7 @@ class AutoRegistrar:
                         pass
         finally:
             timeout_timer.cancel()
+            # 占用释放的唯一出口：超时 / 停止 / 异常 / 成功全部经过这里。
+            # 用 task.claimed_phone 而不是局部 phone —— 后者在各分支被置 None。
+            self._unclaim(task.claimed_phone)
+            task.claimed_phone = None

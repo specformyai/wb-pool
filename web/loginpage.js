@@ -11,7 +11,7 @@
  * 会话仍由后端 HttpOnly cookie 管理，这里不接触也不存储任何凭证。
  * ============================================================ */
 
-import { el, ASSET, apiFetch, toast, refreshIcons } from '@/shared.js';
+import { el, ASSET, ASSET_V, apiFetch, toast, refreshIcons } from '@/shared.js';
 
 const AUTH_STATE = '/api/auth/state';
 const AUTH_LOGIN = '/api/auth/login';
@@ -304,7 +304,7 @@ function renderFatal(root, err, retry) {
 
 function brand(withTitle = true) {
   const kids = [
-    el('img', { src: ASSET + 'icon-192.png', alt: 'wb-pool 图标', width: '52', height: '52' }),
+    el('img', { src: ASSET + 'icon-192.png' + ASSET_V, alt: 'wb-pool 图标', width: '52', height: '52' }),
   ];
   if (withTitle) {
     kids.push(el('h1', { class: 'login-title mono', id: 'login-title', text: 'wb-pool' }));

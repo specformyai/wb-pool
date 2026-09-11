@@ -104,6 +104,9 @@
 .dd-search-inp::placeholder { color: var(--tx3, var(--fg-3)); }
 
 /* ---- 选项列表：内部滚动，细深色滚动条 ---- */
+/* 滚动条走 shared.css 的全局规则 + .scroll-thin 细条，这里不再重复定义
+ * （原先这套硬编码 rgba(255,255,255,.12) 是全站唯一做过样式的滚动条，
+ *  现在统一到 --sb-* 变量，改一处全站生效）。 */
 .dd-list {
   flex: 1 1 auto;
   min-height: 0;
@@ -111,15 +114,9 @@
   overscroll-behavior: contain;
   padding: 5px;
   scrollbar-width: thin;
-  scrollbar-color: rgba(255, 255, 255, .14) transparent;
 }
-.dd-list::-webkit-scrollbar { width: 8px; }
-.dd-list::-webkit-scrollbar-track { background: transparent; }
-.dd-list::-webkit-scrollbar-thumb {
-  background: rgba(255, 255, 255, .12);
-  border-radius: 8px;
-}
-.dd-list::-webkit-scrollbar-thumb:hover { background: rgba(255, 255, 255, .22); }
+.dd-list::-webkit-scrollbar { width: var(--sb-size-thin); }
+.dd-list::-webkit-scrollbar-thumb { border-width: 1px; }
 
 /* ---- 选项行 ---- */
 .dd-opt {

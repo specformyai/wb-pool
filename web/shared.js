@@ -17,7 +17,21 @@ export const $$ = (sel, root = document) => [...root.querySelectorAll(sel)];
  * 从 <link rel="icon"> 的 href 反推基路径，两种部署形态都拿得到正确前缀。 */
 export const ASSET = (() => {
   const href = document.querySelector('link[rel="icon"]')?.getAttribute('href') || './';
+  // 连查询串一起剥掉：href 现在带 ?v=<sha1>（图标也做了 cache-busting）
   return href.replace(/[^/]*$/, '');   // 去掉文件名，留目录前缀
+})();
+
+/* 图片资源的版本查询串，形如 '?v=3f2a91cc'。
+ *
+ * 为什么需要：JS 里写 `ASSET + 'icon-192.png'` 是裸路径，换了图标文件
+ * 浏览器照旧用缓存（favicon / img 的缓存比 JS 模块更顽固，强刷都未必掉）。
+ * 从 <link rel="icon"> 的 href 上取版本号，等于复用 HTML 里那份由
+ * scripts/bump_static_version.py 维护的哈希 —— 不用在每个 JS 里各写一遍。
+ * HTML 上没有 ?v= 时返回空串，退化成原来的行为，不会 404。 */
+export const ASSET_V = (() => {
+  const href = document.querySelector('link[rel="icon"]')?.getAttribute('href') || '';
+  const i = href.indexOf('?');
+  return i >= 0 ? href.slice(i) : '';
 })();
 
 /** 创建元素：el('div', {class:'x', onclick:fn}, ['文本' | node]) */

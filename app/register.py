@@ -104,10 +104,32 @@ class Registrar:
         if not re.fullmatch(r"\+86\d{11}", phone):
             return {"ok": False, "error": "仅支持中国大陆 +86 手机号（上游对其他国家号码一律 400）"}
 
+        # 同号并发守卫。uoomsg 在并发下会把同一个号发给多个请求（实测 4 个
+        # 会话拿到同一个号），几个会话抢同一条短信，其中一个失败还会连坐
+        # 拉黑正在被别人使用的好号。同一个号同时只允许一个存活会话。
+        with self._lock:
+            live = [s for s in self._sessions.values()
+                    if s.phone == phone and not s.expired()]
+        if live:
+            return {"ok": False, "duplicate": True, "session_id": live[0].id,
+                    "error": f"该号码已有进行中的注册会话（{live[0].id}，"
+                             f"剩余 {int(SESSION_TTL - (time.time() - live[0].created_at))}s），"
+                             f"请直接在该会话填码，不要重复发码"}
+
+        # 池内已有账号：不硬拦（重新注册可刷新 token，pool.add 走 updated 分支），
+        # 但必须显式告知 —— 否则白花一次短信费而调用方毫不知情。
+        try:
+            existing = self.pool.find(phone)
+        except Exception:  # noqa: BLE001
+            existing = None
+
         proxy = proxy_override if proxy_override is not None else self.pm.pick()
         sess = RegisterSession(phone, proxy, origin=origin, invite_code=invite_code)
         sess.note(f"号码 {phone}，出口 {proxy or '直连'}")
         sess.note(f"邀请码：{sess.invite_code or '不使用（可选）'}")
+        if existing:
+            sess.note(f"⚠️ 该号码已在账号池中（状态 {existing.status}），"
+                      f"本次注册将覆盖其 token")
 
         try:
             # ① state
@@ -147,10 +169,15 @@ class Registrar:
         sess.note(f"UA: {sess._ua[:60]}…  lang: {sess._lang}")
         with self._lock:
             self._sessions[sess.id] = sess
-        return {"ok": True, "session_id": sess.id, "phone": phone,
-                "invite_code": sess.invite_code,
-                "expires_in": int(SESSION_TTL), "proxy": proxy or "direct",
-                "message": "验证码已发送，请在 5 分钟内提交", "log": sess.log}
+        out = {"ok": True, "session_id": sess.id, "phone": phone,
+               "invite_code": sess.invite_code,
+               "expires_in": int(SESSION_TTL), "proxy": proxy or "direct",
+               "message": "验证码已发送，请在 5 分钟内提交", "log": sess.log}
+        if existing:
+            out["warning"] = (f"该号码已在账号池中（状态 {existing.status}），"
+                              f"完成注册会覆盖其 token")
+            out["existing_status"] = existing.status
+        return out
 
     # ---------------- 阶段二：提交验证码 ----------------
     def finish(self, session_id: str, code: str, label: str = "",

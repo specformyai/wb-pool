@@ -42,6 +42,12 @@ import sys
 JS_PAT = re.compile(r'("@/([^"]+\.js)":\s*"/static/\2\?v=)([0-9a-f]+)(")')
 # <link href="/static/pool.css?v=ce81ac5f">
 CSS_PAT = re.compile(r'(href="/static/([^"?]+\.css)\?v=)([0-9a-f]+)(")')
+# <link rel="icon" href="/static/icon-192.png?v=3f2a91cc">
+#
+# 图片也必须 bump：换了品牌图标而 URL 不变时，浏览器会继续用缓存里的旧图，
+# favicon 的缓存尤其顽固（强刷常常也不掉）。JS 侧由 shared.js 的 ASSET_V
+# 复用这里的哈希，所以维护一处就够。
+IMG_PAT = re.compile(r'(href="/static/([^"?]+\.(?:png|ico|svg|webp))\?v=)([0-9a-f]+)(")')
 
 
 def sha8(path: pathlib.Path) -> str:
@@ -68,6 +74,7 @@ def bump_one(html_file: pathlib.Path, web: pathlib.Path,
 
     html = JS_PAT.sub(repl, html)
     html = CSS_PAT.sub(repl, html)
+    html = IMG_PAT.sub(repl, html)
 
     if not changed:
         print(f"  {html_file.name}: 哈希已是最新")

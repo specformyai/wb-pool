@@ -5,7 +5,7 @@
  * unmount 清理定时器 —— 否则轮询会叠加，切几次后每秒好几个请求。
  * ============================================================ */
 
-import { $, ASSET, refreshIcons, toast } from '@/shared.js';
+import { $, ASSET, ASSET_V, refreshIcons, toast } from '@/shared.js';
 
 const ROUTES = [
   { id: 'overview', name: '概览',      icon: 'layout-dashboard', mod: () => import('@/overview.js') },
@@ -45,7 +45,7 @@ function renderNav() {
   const side = $('#side');
   side.innerHTML = `
     <div class="brand">
-      <div class="brand-mark"><img src="${ASSET}icon-192.png" alt="" width="34" height="34" /></div>
+      <div class="brand-mark"><img src="${ASSET}icon-192.png${ASSET_V}" alt="" width="34" height="34" /></div>
       <div><div class="brand-t">wb-pool</div><div class="brand-s">账号池网关</div></div>
       <button class="side-toggle" id="sideToggle" title="收起侧栏" aria-label="收起侧栏">
         <i data-lucide="panel-left-close"></i>
