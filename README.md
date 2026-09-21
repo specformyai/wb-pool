@@ -12,6 +12,7 @@ WorkBuddy / CodeBuddy 账号池反向代理。把账号的 token 池化，统一
 
 - **OpenAI 兼容**：`GET /v1/models`、`POST /v1/chat/completions`（流式与非流式都支持）
 - **Anthropic 兼容**：`POST /v1/messages`（流式与非流式）
+- **思考透传**：两条口都能拿到思考内容，强度与开关由客户端请求控制；`/v1/models` 暴露每个模型的思考与上下文能力
 - **账号池**：三种调度策略、失败自动切换、配额耗尽 12h 冷却、token 到期前 1h 自动刷新
 - **账号可用性**：连续 auth 失败计数出候选池；账号级故障不消耗正常重试预算
 - **余额**：按套餐拆分展示，定时刷新；请求前对低额度账号做实时校验
@@ -31,6 +32,111 @@ WorkBuddy / CodeBuddy 账号池反向代理。把账号的 token 池化，统一
 | `lru` | 轮询 | 取最久未使用的账号，请求摊到全池（默认） |
 | `drain` | 耗尽优先 | 复用当前账号直到额度打光再换下一个 |
 | `expiry` | 到期优先 | 先用最快到期的账号，避免签到额度作废 |
+
+## 思考与参数协商
+
+### 思考内容
+
+两条口都能拿到思考内容，字段形态各随协议：
+
+| 端点 | 思考内容在哪 |
+|---|---|
+| `/v1/chat/completions` | 流式 `delta.reasoning_content`，非流式 `message.reasoning_content` |
+| `/v1/messages` | `thinking` 块（增量事件 `thinking_delta`），排在 `text` 块之前 |
+
+Anthropic 口默认**不发** `thinking` 块，要不要发由客户端说了算：
+
+**`X-WB-Thinking` 头 > 请求体 `thinking` > 服务端默认 `anthropic_thinking`（默认关）**
+
+| 客户端写法 | 回传思考块 |
+|---|---|
+| `thinking: {"type": "enabled", "budget_tokens": N}` | 是 |
+| `thinking: {"type": "adaptive"}` | 是 |
+| `thinking: {"type": "disabled"}` | 否 |
+| `thinking: "none"` | 否 |
+| 什么都不传 | 按服务端默认 |
+| 头 `X-WB-Thinking: on` / `off` | 强制开 / 关，压过请求体 |
+
+⚠️ Anthropic 官方的 `thinking` 块带 `signature`，供多轮把思考块回传时验签。上游只给纯文本的
+思考内容，拿不到真签名，所以这里发出的块**没有 `signature` 字段**，伪造一个只会让验签必定失败。
+会验签的客户端（Claude Code、官方 SDK 的多轮思考场景）保持默认关；只看不回传的客户端可以开。
+
+### 思考强度
+
+`thinking.budget_tokens` 按档位映射成上游的 `reasoning_effort`：
+
+| budget_tokens | effort |
+|---|---|
+| ≥ 32768 | `xhigh` |
+| ≥ 8192 | `high` |
+| ≥ 2048 | `medium` |
+| > 0 | `low` |
+| `{"type": "disabled"}` | `none` |
+| `{"type": "adaptive"}` | `high` |
+
+这几种直接写法也认：`thinking: "high"`、`thinking: {"effort": "xhigh"}`、Anthropic 口的
+`output_config.effort`，以及 OpenAI 口原生的 `reasoning_effort`。
+
+映射结果会按该模型**真实支持的档位**收敛，而不是原样发上去：模型只支持 `["low", "high"]` 时
+`medium` 落到 `low`，距离相同时取低档（不擅自多烧额度）。`can_disable_thinking=false` 的模型
+收到 `none` 会退回它自己的 `default_effort` —— 不假装思考被关掉了。
+
+### 模型元数据
+
+`GET /v1/models` 带上游声明的思考与上下文能力，客户端发请求前就能知道哪些 effort 合法、
+能不能关思考、有哪些上下文档位：
+
+```json
+{
+  "id": "hy4-preview",
+  "credits": "x0.29",
+  "supports_reasoning": true,
+  "only_reasoning": true,
+  "reasoning": {
+    "can_disable_thinking": false,
+    "default_effort": "high",
+    "supported_efforts": ["high"]
+  },
+  "context_window": {
+    "default_length": 300000,
+    "supported_lengths": [300000, 1000000]
+  }
+}
+```
+
+`only_reasoning=true` 表示该模型只能思考、关不掉。没有 `reasoning` / `context_window` 字段
+就是上游没声明，此时不做任何收敛也不发对应参数。
+
+### 上下文窗口
+
+`context_window` 取值优先级：**请求里显式带 > 面板 `context_window_by_model` 按模型配 > 模型
+`default_length`**。
+
+不在 `supported_lengths` 里的值会被丢弃并回落到默认档。上游对非法档位是静默接受的，不校验
+就会拿到一个与请求不符的窗口而无从察觉。模型没声明 `context_window` 时这个参数不发。
+
+### 参数协商
+
+上游会**静默忽略**一批 OpenAI 参数：要 `response_format: json_object`，回来的是散文；`n=2`
+只回一个 choice。默认对这些参数直接回 `400`，让客户端立刻知道这个语义要不到，而不是拿着一个
+不符合预期的结果却不知道为什么。
+
+拒绝名单：`response_format`、`n`、`seed`、`logprobs`、`top_logprobs`、`presence_penalty`、
+`frequency_penalty`、`logit_bias`、`functions`、`function_call`、`store`、`metadata`、
+`modalities`、`audio`、`prediction`、`web_search_options`、`service_tier`
+
+硬发这些参数的旧客户端可以在面板关掉 `reject_unsupported_params`，关掉后它们会被丢弃、请求照常发出。
+
+### SSE 心跳
+
+思考模型可能几分钟不吐正文，nginx / Cloudflare 一类中间层会把这种连接当成死连接切掉。
+`sse_keepalive_sec`（默认 15 秒，`0` = 关）在上游空闲超过该间隔时发一条 SSE 注释行：
+
+```
+: wb-pool keepalive
+```
+
+只发注释，不伪造 token、usage 或完成事件，所以客户端的解析器不会把它当成数据。
 
 ## 上游实测要点
 
@@ -101,6 +207,10 @@ python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
 | 填接码平台 token | 「设置 → 接码平台」（也可以用 `WB_UOOMSG_TOKEN`） |
 | 配出口代理 | 「代理池」页手动加端口，或点「自动探测」扫一段 |
 | 改签到时间 / 余额刷新间隔 | 「设置 → 运行时配置」 |
+| Anthropic 思考块的默认开关 | 「设置 → 运行时配置」`anthropic_thinking` |
+| SSE 心跳间隔 | `sse_keepalive_sec`（秒，0 = 关） |
+| 关掉「不支持参数直接 400」 | `reject_unsupported_params` |
+| 按模型钉死上下文档位 | `context_window_by_model` |
 
 配置优先级是 **面板设置 > 环境变量 > 代码默认值**，面板改的值存在 `data/settings.json`。
 所以 `.env` 只需要填最少的两把密钥，别的都能事后在界面上调。
@@ -203,9 +313,17 @@ ES module 有独立于 HTTP 缓存的模块图缓存，`?v=<sha1>` 不变浏览�
 ## 接入
 
 ```bash
+# OpenAI 口：思考内容在 delta.reasoning_content
 curl $BASE/v1/chat/completions \
   -H "Authorization: Bearer ***" -H "Content-Type: application/json" \
   -d '{"model":"auto","messages":[{"role":"user","content":"你好"}],"stream":true}'
+
+# Anthropic 口：带 thinking 才回传思考块
+curl $BASE/v1/messages \
+  -H "x-api-key: ***" -H "Content-Type: application/json" \
+  -d '{"model":"auto","max_tokens":1024,"stream":true,
+       "thinking":{"type":"enabled","budget_tokens":8192},
+       "messages":[{"role":"user","content":"你好"}]}'
 ```
 
 ## 边界
