@@ -219,6 +219,16 @@ def get_balance(token: str, proxy: str | None = None,
             with httpx.Client(proxy=proxy, timeout=timeout) as c:
                 r = c.post(f"{COPILOT}/v2/billing/meter/get-user-resource",
                            json=body, headers=auth_headers(token))
+            # 账号被上游禁用时，网关（APISIX）直接回 401 + HTML 错误页。
+            # 旧实现无条件 r.json()，抛出的是
+            #   "Expecting value: line 1 column 1 (char 0)"
+            # —— 这个串既不含状态码也不含任何业务特征，classify_error
+            # 只能判成 other，于是号被无限重试。把状态码和 body 摘要带出来，
+            # 分类器才有东西可判（AUTH_KEYWORDS 认 "authorization required"）。
+            ctype = (r.headers.get("content-type") or "").lower()
+            if r.status_code != 200 or "json" not in ctype:
+                snippet = " ".join(r.text.split())[:200]
+                raise ValueError(f"http {r.status_code}: {snippet}")
             j = r.json()
             data = (j.get("data") or {}).get("Response", {}).get("Data", {}) or {}
             accs = data.get("Accounts") or []

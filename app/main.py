@@ -442,7 +442,7 @@ def _tries_headers(acc: Account | None, tried: list[str]) -> dict[str, str]:
     return h
 
 
-def _pick_account(force_key: str | None = None) -> Account:
+def _pick_account(force_key: str | None = None, model: str = "") -> Account:
     if force_key:
         acc, err = pool.acquire_specific(force_key, proxy=pm.pick())
         if not acc:
@@ -450,8 +450,26 @@ def _pick_account(force_key: str | None = None) -> Account:
         return acc
     # acquire_verified：对「余额低且数据陈旧」的号先实时核一次余额，
     # 实测为 0 就换下一个，避免把请求发给已被打光的号（必回 14018）。
-    acc = pool.acquire_verified(proxy=pm.pick())
+    #
+    # model 传下去做**模型级**限流过滤。上游 6004 是模型级不是账号级：
+    # 2026-09-20 实测同一账号同一时刻 deepseek-v4.1-flash 回 6004，而
+    # hy3 / glm-5.1 照常出内容。所以被 6004 锁住的号只该对那一个模型
+    # 退出候选池，对其它模型必须继续可用 —— 整号禁用会白扔一个好号。
+    acc = pool.acquire_verified(proxy=pm.pick(), model=model)
     if not acc:
+        # 「池子空了」和「这个模型在所有号上都限流」是两件事，必须分开报：
+        # 后者换个模型立刻能用，报成 503「没有可用账号」会让人去查账号池。
+        limited = pool.rate_limited_for(model) if model else []
+        if limited:
+            wait = max(1, min(int(x["in_sec"]) for x in limited))
+            raise HTTPException(429, {"error": {
+                "message": (f"模型 {model} 在全部 {len(limited)} 个可用账号上均触发上游"
+                            f"频率限制，约 {wait // 60} 分 {wait % 60} 秒后自动恢复；"
+                            f"也可以切换其它模型立即继续。"),
+                "type": "rate_limit_error",
+                "code": 6004,
+                "retry_after": wait,
+            }})
         raise HTTPException(503, "账号池中没有可用账号，请先在 WebUI 添加账号")
     return acc
 
@@ -525,7 +543,7 @@ async def chat_completions(request: Request) -> Any:
     swaps_left = 0 if (force_key or is_debug_request) else min(12, max(1, len(pool.all())))
     while max_tries > 0:
         t0 = time.time()
-        acc = _pick_account(force_key)
+        acc = _pick_account(force_key, model=model)
         if acc.masked() in tried:
             if swaps_left > 0:
                 swaps_left -= 1
@@ -547,15 +565,18 @@ async def chat_completions(request: Request) -> Any:
                       stream=want_stream)
             if force_key:
                 # 指定账号调试也要落状态；否则持续 11140 的封禁号会一直显示 usable。
-                pool.release(acc, error=last_err)
+                pool.release(acc, error=last_err, model=model)
                 raise HTTPException(502, {"error": {"message": last_err,
                                                     "code": exc.code,
                                                     "type": "upstream_error"}})
-            pool.release(acc, error=last_err)
+            pool.release(acc, error=last_err, model=model)
             if exc.code == 11102:
                 raise HTTPException(400, {"error": {"message": exc.msg, "code": exc.code,
                                                     "type": "invalid_request_error"}})
-            if classify_error(last_err) in ("auth", "quota") and swaps_left > 0:
+            # rate 和 auth/quota 同理，都是「这个号（对这个模型）废了」而不是
+            # 「这次请求失败了」：换号继续，不消耗 max_tries。刚被锁的号已经
+            # 出了候选池，下一轮 acquire 不会再取到它。
+            if classify_error(last_err) in ("auth", "quota", "rate") and swaps_left > 0:
                 swaps_left -= 1
                 continue
             max_tries -= 1
@@ -566,7 +587,7 @@ async def chat_completions(request: Request) -> Any:
                       account=acc.masked(), error=last_err, stream=want_stream, code=502)
             if force_key:
                 raise HTTPException(502, {"error": {"message": last_err, "type": "upstream_error"}})
-            pool.release(acc, error=last_err)
+            pool.release(acc, error=last_err, model=model)
             max_tries -= 1
             continue
         except Exception as exc:       # noqa: BLE001
@@ -582,7 +603,7 @@ async def chat_completions(request: Request) -> Any:
                     swaps_left -= 1
                     continue
                 break
-            pool.release(acc, error=last_err)
+            pool.release(acc, error=last_err, model=model)
             max_tries -= 1
             continue
 
@@ -604,14 +625,14 @@ async def chat_completions(request: Request) -> Any:
                     yield "data: [DONE]\n\n"
                     credit = ledger.record(model, usage)
                     tk = (usage or {}).get("total_tokens", 0)
-                    pool.release(acc, tokens=tk, credits=credit)
+                    pool.release(acc, tokens=tk, credits=credit, model=model)
                     _log_call(request, model=model, ok=True, endpoint="chat", t0=t0,
                               tokens=tk, credits=credit, account=acc.masked(), stream=True,
                               t_first=t_first,
                               in_tokens=(usage or {}).get("prompt_tokens", 0),
                               out_tokens=(usage or {}).get("completion_tokens", 0), code=200)
                 except Exception as exc:  # noqa: BLE001
-                    pool.release(acc, error=str(exc)[:200])
+                    pool.release(acc, error=str(exc)[:200], model=model)
                     _log_call(request, model=model, ok=False, endpoint="chat", t0=t0,
                               account=acc.masked(), error=str(exc)[:200], stream=True, code=502)
                     yield _sse({"error": {"message": str(exc)[:200], "type": "upstream_error"}})
@@ -628,14 +649,14 @@ async def chat_completions(request: Request) -> Any:
             content, reasoning, usage, finish, tool_calls = await asyncio.to_thread(
                 _collect_chat, first, gen)
         except Exception as exc:  # noqa: BLE001
-            pool.release(acc, error=str(exc)[:200])
+            pool.release(acc, error=str(exc)[:200], model=model)
             _log_call(request, model=model, ok=False, endpoint="chat", t0=t0,
                       account=acc.masked(), error=str(exc)[:200], code=502)
             raise HTTPException(502, f"上游流中断: {exc}"[:200])
 
         credit = ledger.record(model, usage)
         tk = (usage or {}).get("total_tokens", 0)
-        pool.release(acc, tokens=tk, credits=credit)
+        pool.release(acc, tokens=tk, credits=credit, model=model)
         _log_call(request, model=model, ok=True, endpoint="chat", t0=t0,
                   tokens=tk, credits=credit, account=acc.masked(),
                   t_first=t_first,
@@ -988,7 +1009,8 @@ async def anthropic_messages(request: Request) -> Any:
     # /v1/messages 是分发给使用者的口，指定账号的调试头只认管理路由（见 chat_completions）
     acc = _pick_account(
         (request.headers.get("X-WB-Force-Account") or "").strip() or None
-        if request.url.path.startswith("/api/") else None
+        if request.url.path.startswith("/api/") else None,
+        model=model,
     )
     proxy = pm.pick()
     mid = f"msg_{uuid.uuid4().hex[:24]}"
@@ -1000,13 +1022,13 @@ async def anthropic_messages(request: Request) -> Any:
         first = await asyncio.to_thread(_next_upstream_chunk, gen)
         t_first = time.time()
     except upstream.UpstreamError as exc:
-        pool.release(acc, error=f"{exc.code}: {exc.msg}")
+        pool.release(acc, error=f"{exc.code}: {exc.msg}", model=model)
         _log_call(request, model=model, ok=False, endpoint="messages", t0=t0,
                   account=acc.masked(), code=exc.code, error=exc.msg, stream=want_stream)
         return _anthropic_error_response(exc.status, exc.msg)
     except _EmptyUpstreamStream:
         err = "上游返回空流"
-        pool.release(acc, error=err)
+        pool.release(acc, error=err, model=model)
         _log_call(request, model=model, ok=False, endpoint="messages", t0=t0,
                   account=acc.masked(), error=err, stream=want_stream, code=502)
         return _anthropic_error_response(502, err)
@@ -1016,7 +1038,7 @@ async def anthropic_messages(request: Request) -> Any:
             pm.mark_bad(proxy)
             pool.release(acc)
         else:
-            pool.release(acc, error=err)
+            pool.release(acc, error=err, model=model)
         _log_call(request, model=model, ok=False, endpoint="messages", t0=t0,
                   account=acc.masked(), error=err, stream=want_stream, code=502)
         return _anthropic_error_response(502, f"上游失败: {err}")
@@ -1031,11 +1053,8 @@ async def anthropic_messages(request: Request) -> Any:
             tool_call_store: dict[int, dict[str, Any]] = {}
             released = False
             logged = False
-            # 思考透传默认关：Anthropic 的 thinking 块按官方约定带 signature，
-            # 供多轮回传时验签。上游只给 OpenAI 口径的 reasoning_content 纯文本，
-            # 拿不到真签名，伪造必然验签失败。默认关 = 对严格客户端安全；
-            # 需要看思考的场景由部署者显式打开（或直接用 /v1/chat/completions，
-            # 那条口的 reasoning_content 一直是完整的）。
+            # 思考透传：发出的 thinking 块没有 signature（上游只给纯文本
+            # reasoning_content）。默认开，见 settings.py 的 anthropic_thinking。
             # 客户端说了算：请求体 thinking 参数 / X-WB-Thinking 头；
             # 都没表态时才用服务端默认（见 reasoning.wants_thinking）。
             emit_think = rsn.wants_thinking(
@@ -1136,7 +1155,7 @@ async def anthropic_messages(request: Request) -> Any:
 
                 credit = ledger.record(model, usage)
                 total_tokens = (usage or {}).get("total_tokens", 0)
-                pool.release(acc, tokens=total_tokens, credits=credit)
+                pool.release(acc, tokens=total_tokens, credits=credit, model=model)
                 released = True
                 _log_call(request, model=model, ok=True, endpoint="messages", t0=t0,
                           tokens=total_tokens, credits=credit,
@@ -1154,7 +1173,7 @@ async def anthropic_messages(request: Request) -> Any:
             except Exception as exc:  # noqa: BLE001
                 err = str(exc)[:200]
                 if not released:
-                    pool.release(acc, error=err)
+                    pool.release(acc, error=err, model=model)
                     released = True
                 if not logged:
                     _log_call(request, model=model, ok=False, endpoint="messages", t0=t0,
@@ -1188,7 +1207,7 @@ async def anthropic_messages(request: Request) -> Any:
             _collect_chat, first, gen)
     except Exception as exc:  # noqa: BLE001
         err = str(exc)[:200]
-        pool.release(acc, error=err)
+        pool.release(acc, error=err, model=model)
         _log_call(request, model=model, ok=False, endpoint="messages", t0=t0,
                   account=acc.masked(), error=err, code=502)
         return _anthropic_error_response(502, f"上游流中断: {err}")
@@ -1215,7 +1234,7 @@ async def anthropic_messages(request: Request) -> Any:
 
     credit = ledger.record(model, usage)
     total_tokens = (usage or {}).get("total_tokens", 0)
-    pool.release(acc, tokens=total_tokens, credits=credit)
+    pool.release(acc, tokens=total_tokens, credits=credit, model=model)
     _log_call(request, model=model, ok=True, endpoint="messages", t0=t0,
               tokens=total_tokens, credits=credit,
               account=acc.masked(), t_first=t_first,
@@ -1574,6 +1593,10 @@ def get_pool() -> dict[str, Any]:
             # 不影响调度：余额查不到不等于号坏了，只是提醒人看一眼）
             "balance_fail_count": a.balance_fail_count,
             "balance_fail_at": a.balance_fail_at,
+            # 模型级限流（上游 6004）。整号禁用是错的：实测同一账号同一时刻
+            # deepseek-v4.1-flash 回 6004 而 hy3/glm-5.1 正常出内容，所以这里
+            # 给的是 {模型名: 剩余秒数}，status 保持 active。到点自动恢复。
+            "model_limits": a.limited_models(),
         })
     return {"stats": pool.stats(), "accounts": accs}
 

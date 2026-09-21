@@ -33,6 +33,15 @@ WorkBuddy / CodeBuddy 账号池反向代理。把账号的 token 池化，统一
 | `drain` | 耗尽优先 | 复用当前账号直到额度打光再换下一个 |
 | `expiry` | 到期优先 | 先用最快到期的账号，避免签到额度作废 |
 
+### 模型级限流
+
+上游的频率限制（业务码 6004）是按「账号 × 模型」算的：同一账号在某个模型上被限流的同时，
+换个模型立刻能用。所以遇到 6004 只把**这个账号的这个模型**锁到上游给的重置时刻，账号状态
+不动、对其它模型照常参与轮换；成功一次即解锁，到点自动恢复，不依赖定时任务。
+面板账号行会显示「限流 N 个模型」标签。当某模型在全部可用账号上都被限流时，返回 `429`
+并带 `retry_after`（秒），而不是 `503`「没有可用账号」。兜底冷却见 `.env.example` 的
+`WB_RATE_COOLDOWN_SEC` / `WB_RATE_COOLDOWN_MAX_SEC`。
+
 ## 思考与参数协商
 
 ### 思考内容
@@ -44,9 +53,9 @@ WorkBuddy / CodeBuddy 账号池反向代理。把账号的 token 池化，统一
 | `/v1/chat/completions` | 流式 `delta.reasoning_content`，非流式 `message.reasoning_content` |
 | `/v1/messages` | `thinking` 块（增量事件 `thinking_delta`），排在 `text` 块之前 |
 
-Anthropic 口默认**不发** `thinking` 块，要不要发由客户端说了算：
+Anthropic 口默认**发** `thinking` 块，要不要发由客户端说了算：
 
-**`X-WB-Thinking` 头 > 请求体 `thinking` > 服务端默认 `anthropic_thinking`（默认关）**
+**`X-WB-Thinking` 头 > 请求体 `thinking` > 服务端默认 `anthropic_thinking`（默认开）**
 
 | 客户端写法 | 回传思考块 |
 |---|---|
@@ -59,7 +68,9 @@ Anthropic 口默认**不发** `thinking` 块，要不要发由客户端说了算
 
 ⚠️ Anthropic 官方的 `thinking` 块带 `signature`，供多轮把思考块回传时验签。上游只给纯文本的
 思考内容，拿不到真签名，所以这里发出的块**没有 `signature` 字段**，伪造一个只会让验签必定失败。
-会验签的客户端（Claude Code、官方 SDK 的多轮思考场景）保持默认关；只看不回传的客户端可以开。
+多轮回传时本服务只取 `text` 块送上游，`thinking` 块不会被转发，所以回传本身不会出错（dsh 实测）。
+只有客户端自己在本地严格验签时才需要关掉：请求体 `thinking: {"type": "disabled"}`，或把
+`anthropic_thinking` 改成 `false`。
 
 ### 思考强度
 
@@ -122,8 +133,11 @@ Anthropic 口默认**不发** `thinking` 块，要不要发由客户端说了算
 不符合预期的结果却不知道为什么。
 
 拒绝名单：`response_format`、`n`、`seed`、`logprobs`、`top_logprobs`、`presence_penalty`、
-`frequency_penalty`、`logit_bias`、`functions`、`function_call`、`store`、`metadata`、
-`modalities`、`audio`、`prediction`、`web_search_options`、`service_tier`
+`frequency_penalty`、`logit_bias`、`functions`、`function_call`、`store`、
+`modalities`、`audio`、`prediction`、`web_search_options`
+
+`metadata` 与 `service_tier` 不在名单里：它们是 Anthropic 官方参数（Claude Code 每个请求都带
+`metadata.user_id`），只是元信息、不改变回复语义，会被静默丢弃而不是拒绝。
 
 硬发这些参数的旧客户端可以在面板关掉 `reject_unsupported_params`，关掉后它们会被丢弃、请求照常发出。
 

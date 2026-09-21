@@ -92,6 +92,12 @@ function normalizeAccount(raw, idx) {
     // 余额刷新连续失败次数（后端 refresh_balances 记的）。>0 就在状态旁标「余额异常」，
     // 只是提醒，不改变状态分类 —— 余额查不到不等于号不能用。
     balanceFails: Number(raw.balance_fail_count ?? 0) || 0,
+    // 模型级限流（上游 6004）：{模型名: 剩余秒数}，由后端 limited_models() 算好。
+    // 剩余秒数由后端算 —— 前端不能拿本地时钟去减后端时间戳（跨时区/时钟漂移
+    // 都会算错，同 daily_grant_today 那个坑）。status 保持 active：这个号对
+    // 其它模型照常可用，不该显示成「异常」。
+    modelLimits: (raw.model_limits && typeof raw.model_limits === 'object')
+      ? raw.model_limits : {},
     packages: fmtPackages(raw.packages ?? raw.package),
     maxBal: 1, balTier: 'none', // 统一在 loadPool 中计算
   };
@@ -166,11 +172,27 @@ function expHtml(a) {
   return `<div class="exp ${tier}"><span class="exp-dot"></span><span>${fmtHours(a.hours)}</span></div>
           <div class="bar slim ${tier}"><i style="width:${gauge}%"></i></div>`;
 }
+// 限流剩余时间：后端给的是秒数，这里只做展示格式化。
+function fmtLimitLeft(sec) {
+  const s = Math.max(0, Math.round(Number(sec) || 0));
+  if (s < 60) return `${s} 秒`;
+  const m = Math.round(s / 60);
+  if (m < 60) return `${m} 分钟`;
+  const h = Math.floor(m / 60);
+  return `${h} 小时 ${m % 60} 分`;
+}
 function statusHtml(a) {
   const expiredBadge = (a.hours != null && a.hours <= 0) ? '<span class="pill st-bad mini">Token 过期</span>' : '';
   const balBadge = a.balanceFails > 0
     ? `<span class="pill st-depleted mini" title="余额刷新连续失败 ${a.balanceFails} 次（超时/上游报错），不影响调度">余额异常 ×${a.balanceFails}</span>` : '';
-  return `<span class="pill st-${a.statusKey}"><span class="pill-dot"></span>${escapeHtml(a.statusText)}</span>${expiredBadge}${balBadge}`;
+  // 模型级限流：只锁了某几个模型，账号本身仍在服役 —— 所以用 st-depleted
+  // （琥珀，「暂时不可用」）而不是 st-error（红，「坏号」）。
+  const lim = Object.entries(a.modelLimits || {});
+  const limBadge = lim.length
+    ? `<span class="pill st-depleted mini" title="${escapeHtml(
+        lim.map(([m, s]) => `${m}：约 ${fmtLimitLeft(s)}后恢复`).join('\n'))
+      }">限流 ${lim.length} 个模型</span>` : '';
+  return `<span class="pill st-${a.statusKey}"><span class="pill-dot"></span>${escapeHtml(a.statusText)}</span>${expiredBadge}${balBadge}${limBadge}`;
 }
 function opsHtml(a, withText = false) {
   const dis = a.phone ? '' : 'disabled';

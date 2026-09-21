@@ -19,7 +19,25 @@ from .proxies import is_proxy_error
 QUOTA_KEYWORDS = ("quota", "insufficient", "余额", "积分不足", "配额", "exceeded",
                   "资源包", "arrears", "额度已用尽", "额度不足")
 AUTH_KEYWORDS = ("unauthorized", "invalid_token", "token expired",
-                 "invalid grant", "forbidden", "request illegal")
+                 "invalid grant", "invalid_grant", "forbidden",
+                 "request illegal",
+                 # 上游网关（APISIX/openresty）在账号被禁时直接返回 401 HTML
+                 # 错误页，body 里没有任何业务码 —— _err_code 取不到码，
+                 # 而 "unauthorized" 也不出现（页面写的是 "Authorization
+                 # Required"）。旧名单漏了这个词形，于是被封号的请求被判成
+                 # other：不计 auth_fail、不改状态、不设冷却，号永远留在
+                 # 候选池里反复撞墙（实测 4898 在 6 分钟内撞了 17 次）。
+                 "authorization required",
+                 # refresh_token 被吊销时 SSO 回的原文
+                 "user disabled", "user not found")
+
+# 频率限制（上游码 6004）。**这是模型级的，不是账号级的。**
+# 实测同一账号在 deepseek-v4.1-flash 上 6004 的同一时刻，hy3 与 glm-5.1
+# 都能正常出内容（错误文案自己也写着「您也可以切换其他模型继续使用」）。
+# 所以这类错误既不该标 dead（号是好的），也不该放任不管（不管就会被
+# 反复轮到、每次白烧一次请求）—— 只禁这一个模型到重置时刻。
+RATE_KEYWORDS = ("频率限制", "rate limit", "too many requests",
+                 "请求过于频繁")
 
 # 上游业务码 → 分类。**优先用码判，不要在整串里搜裸数字。**
 # 2026-08-24：AUTH_KEYWORDS 里原本有裸 "401"，而上游码 14018（额度已用尽）
@@ -36,6 +54,19 @@ VERIFY_STALE_SEC = float(os.environ.get("WB_VERIFY_STALE_SEC", "120"))
 
 QUOTA_CODES = frozenset({11003, 11004, 14018})
 AUTH_CODES = frozenset({11140, 401, 403})
+RATE_CODES = frozenset({6004})
+# refresh_token 被上游吊销的码。这是「账号在上游被禁」的权威判据 ——
+# 比聊天接口的 11140 更强：11140 只说明这次请求被拒，而 refresh 失败且
+# 回 invalid_grant/User disabled 说明凭据本身没了，本地怎么重试都救不回。
+REVOKED_CODES = frozenset({12153})
+REVOKED_KEYWORDS = ("invalid_grant", "user disabled", "user not found",
+                    "account disabled")
+
+# 解析不出重置时刻时的兜底冷却。上游给的「将在 X 重置」并不总可信
+# （实测有比错误发生时刻还早 3 小时的值），解析到过去时间就用这个。
+RATE_COOLDOWN_SEC = float(os.environ.get("WB_RATE_COOLDOWN_SEC", "1800"))
+# 单个模型最长锁多久 —— 防止上游给出个离谱的远期时间把模型永久锁死。
+RATE_COOLDOWN_MAX_SEC = float(os.environ.get("WB_RATE_COOLDOWN_MAX_SEC", "86400"))
 
 
 def _err_code(err: str) -> int | None:
@@ -62,17 +93,58 @@ def _has_kw(low: str, words: tuple[str, ...]) -> bool:
     return False
 
 
+def parse_rate_reset(err: str, now: float | None = None) -> float:
+    """从 6004 错误串里解析「将在 YYYY-MM-DD HH:MM:SS UTC+8 重置」→ epoch。
+
+    时间是固定 UTC+8 标注的，**不能用 time.mktime**（那会按本机时区解释，
+    换个时区部署就整体偏移）。用 calendar.timegm 按 UTC 解释再减 8 小时。
+
+    上游给的时刻不总可信：实测 133****8634 在 04:54 收到的 6004 写着
+    「01:35:46 重置」—— 比错误本身还早 3 小时。解析到过去时间（或压根
+    解析不出）就退回 RATE_COOLDOWN_SEC，并统一钳到 RATE_COOLDOWN_MAX_SEC。
+    """
+    import calendar
+    now = time.time() if now is None else now
+    m = re.search(r"(\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2})\s*UTC\+8", err or "")
+    ts = 0.0
+    if m:
+        try:
+            st = time.strptime(m.group(1).replace("T", " "), "%Y-%m-%d %H:%M:%S")
+            ts = float(calendar.timegm(st) - 8 * 3600)
+        except ValueError:
+            ts = 0.0
+    # 解析失败 / 已过期的时刻 → 兜底冷却
+    if ts <= now + 1:
+        ts = now + RATE_COOLDOWN_SEC
+    return min(ts, now + RATE_COOLDOWN_MAX_SEC)
+
+
+def is_revoked_error(err: str) -> bool:
+    """refresh_token 被上游吊销（账号被禁）——本地无法恢复。"""
+    if not err:
+        return False
+    code = _err_code(err)
+    if code is not None and code in REVOKED_CODES:
+        return True
+    return _has_kw(err.lower(), REVOKED_KEYWORDS)
+
+
 def classify_error(err: str) -> str:
     """返回 'quota' | 'auth' | 'other'。码优先，关键词兜底。"""
     if not err:
         return "other"
     code = _err_code(err)
     if code is not None:
+        # rate 先判：6004 的文案里没有 quota/auth 类词，但顺序写死更稳
+        if code in RATE_CODES:
+            return "rate"
         if code in QUOTA_CODES:
             return "quota"
         if code in AUTH_CODES:
             return "auth"
     low = err.lower()
+    if _has_kw(low, RATE_KEYWORDS):
+        return "rate"
     if _has_kw(low, QUOTA_KEYWORDS):
         return "quota"
     if _has_kw(low, AUTH_KEYWORDS):
@@ -139,6 +211,12 @@ class Account:
     # 成功一次清零。只做标签给面板看，**不改 status、不影响调度**。
     balance_fail_count: int = 0
     balance_fail_at: float = 0.0
+    # 模型级限流冷却表 {model: 冷却到期 epoch}（2026-09-20 加）。
+    # 上游 6004 是按「账号 × 模型」限流的，同号换个模型立刻能用。
+    # 旧实现把 6004 判成 other：不改状态也不记冷却，于是被限流的号
+    # 继续留在候选池里，LRU 每轮都轮到它，每次必然再吃一次 6004。
+    # 只记冷却、不动 status —— 这个号对别的模型仍然是好号。
+    model_limits: dict[str, float] = field(default_factory=dict)
     note: str = ""
 
     def checkin_settled(self, today: str) -> bool:
@@ -166,6 +244,34 @@ class Account:
         if self.credits_checked_at > 0 and self.credits_total <= 0:
             return False
         return bool(self.access_token)
+
+    def prune_model_limits(self, now: float | None = None) -> bool:
+        """清掉已到期的模型限流记录。返回是否有改动（供调用方决定落盘）。"""
+        now = time.time() if now is None else now
+        if not self.model_limits:
+            return False
+        dead = [m for m, until in self.model_limits.items() if until <= now]
+        for m in dead:
+            self.model_limits.pop(m, None)
+        return bool(dead)
+
+    def model_available(self, model: str = "", now: float | None = None) -> bool:
+        """这个号现在能不能用来打 `model`。
+
+        model 为空（签到 / 余额 / 探针等与模型无关的路径）时恒 True ——
+        限流是模型级的，不该影响这些路径。
+        """
+        if not model or not self.model_limits:
+            return True
+        now = time.time() if now is None else now
+        return float(self.model_limits.get(model) or 0) <= now
+
+    def limited_models(self, now: float | None = None) -> dict[str, float]:
+        """当前仍在冷却中的模型 → 剩余秒数（面板用）。"""
+        now = time.time() if now is None else now
+        return {m: round(until - now, 1)
+                for m, until in (self.model_limits or {}).items()
+                if until > now}
 
     def expires_in(self) -> float:
         if not self.expires_at:
@@ -312,7 +418,8 @@ class AccountPool:
 
     # ---------------- rotation ----------------
     def acquire(self, proxy: str | None = None,
-                mode: str | None = None) -> Account | None:
+                mode: str | None = None,
+                model: str = "") -> Account | None:
         """
         取一个可用账号，必要时先刷新 token。
 
@@ -323,14 +430,20 @@ class AccountPool:
         self.reload_if_changed()
         mode = (mode or self.rotation_mode or "lru").lower()
         with self._lock:
-            cands = [a for a in self._accounts if a.usable()]
+            # 到点自动恢复：限流表里过期的条目在这里统一清掉，
+            # 不依赖任何定时任务 —— 下一次取号即恢复。
+            for a in self._accounts:
+                a.prune_model_limits()
+            cands = [a for a in self._accounts
+                     if a.usable() and a.model_available(model)]
             if not cands:
                 # 冷却期已过的自动复活
                 now = time.time()
                 for a in self._accounts:
                     if a.status == "exhausted" and now >= a.cooldown_until:
                         a.status = "active"
-                cands = [a for a in self._accounts if a.usable()]
+                cands = [a for a in self._accounts
+                         if a.usable() and a.model_available(model)]
             if not cands:
                 return None
             if mode == "drain":
@@ -377,6 +490,16 @@ class AccountPool:
         with self._lock:
             if res.get("error"):
                 acc.last_error = f"refresh failed: {res['error']}"[:300]
+                # refresh_token 被吊销（12153 invalid_grant / User disabled）
+                # = 账号在上游被禁，本地再怎么重试都救不回来。这是比聊天
+                # 11140 更硬的判据，直接标 dead 并清零本地余额快照 ——
+                # 那个快照是号还活着时抓的，留着会让废号在 LRU 里抢队头
+                # （实测 4898 挂着 5021.69 的假余额，占着池内余额第一名）。
+                if is_revoked_error(str(res.get("error"))):
+                    acc.status = "dead"
+                    acc.credits_total = 0.0
+                    acc.credits_checked_at = time.time()
+                    acc.note = (acc.note or "") or "上游吊销 refresh_token（账号被禁）"
                 # 走的是 CLI 真实链路（SSO /v2/plugin/auth/token/refresh），
                 # 实测各状态账号均能 200 —— 所以这里失败是真失败，不再是
                 # 早先那个"端点用错导致恒 401"的假象。
@@ -394,14 +517,26 @@ class AccountPool:
         return True
 
     def release(self, acc: Account, error: str | None = None,
-                tokens: int = 0, credits: float = 0.0) -> None:
+                tokens: int = 0, credits: float = 0.0,
+                model: str = "") -> None:
+        """归还账号并按错误类型落状态。
+
+        model 是本次请求实际打的模型名 —— rate（6004）必须拿到它才能
+        做模型级隔离；拿不到就只能退化成记 last_error（不禁号，宁可
+        再撞一次，也不要把一个只是某模型限流的好号整个停掉）。
+        """
         with self._lock:
             acc.token_count += max(0, tokens)
             acc.credits_spent = round(acc.credits_spent + max(0.0, credits), 4)
+            acc.prune_model_limits()
             if error:
                 acc.last_error = error[:300]
                 kind = classify_error(error)
-                if kind == "quota":
+                if kind == "rate":
+                    # 模型级：只锁这一个模型到重置时刻，status 不动。
+                    if model:
+                        acc.model_limits[model] = parse_rate_reset(error)
+                elif kind == "quota":
                     acc.status = "exhausted"
                     acc.cooldown_until = time.time() + EXHAUST_COOLDOWN
                     # 上游说额度用尽，本地余额不该还挂着正数：归零并标记
@@ -415,6 +550,9 @@ class AccountPool:
             else:
                 acc.last_error = ""
                 acc.auth_fail_count = 0
+                # 成功即证明该模型没在限流，清掉可能残留的记录
+                if model:
+                    acc.model_limits.pop(model, None)
                 if acc.status == "exhausted" and time.time() >= acc.cooldown_until:
                     acc.status = "active"
             self.save()
@@ -475,11 +613,23 @@ class AccountPool:
                     acc.registered_at = bal["registered_at"]
             elif not is_proxy_error(bal.get("error")):
                 acc.last_error = f"balance: {bal.get('error', 'unknown')}"[:300]
+                # 余额接口回 401/被禁：本地那个正数快照已经不可信了。
+                # 不清零的话 usable() 的余额门槛形同虚设，LRU 还会把它
+                # 排在队头（余额越高越像好号），每次都白烧一次请求。
+                # 注意只对 auth 类清零 —— 链路错误已被上面的分支挡掉，
+                # 其它未知错误不动余额，避免凭一次查询失败误杀好号。
+                if classify_error(str(bal.get("error") or "")) == "auth":
+                    acc.credits_total = 0.0
+                    acc.credits_checked_at = time.time()
+                    acc.auth_fail_count += 1
+                    if acc.auth_fail_count >= AUTH_FAIL_LIMIT:
+                        acc.status = "dead"
         return bal
 
     def acquire_verified(self, proxy: str | None = None,
                          mode: str | None = None,
-                         max_tries: int = 4) -> Account | None:
+                         max_tries: int = 4,
+                         model: str = "") -> Account | None:
         """取号，并对「余额低且数据陈旧」的号先实时核一次余额。
 
         余额刷新是定时的（默认 10 分钟），两次之间余额可能已被打光。
@@ -492,7 +642,7 @@ class AccountPool:
         tried: set[str] = set()
         acc = None
         for _ in range(max(1, max_tries)):
-            acc = self.acquire(proxy=proxy, mode=mode)
+            acc = self.acquire(proxy=proxy, mode=mode, model=model)
             if acc is None:
                 return None
             if acc.phone in tried:
@@ -638,6 +788,23 @@ class AccountPool:
         self.save()
         # 签到后余额会变，刷新一次
         self.refresh_balances(proxy=proxy)
+        return out
+
+    def rate_limited_for(self, model: str) -> list[dict[str, Any]]:
+        """因该模型限流而被挡在候选池外的账号（用于区分 503 的真实原因）。
+
+        「全池无可用账号」和「这个模型全部账号都在限流中」是两件事，
+        后者换个模型立刻能用 —— 报错必须说清，否则用户会去查账号池。
+        """
+        now = time.time()
+        out = []
+        for a in self.all():
+            if not a.usable():
+                continue
+            until = float((a.model_limits or {}).get(model) or 0)
+            if until > now:
+                out.append({"masked": a.masked(), "until": until,
+                            "in_sec": round(until - now, 1)})
         return out
 
     def stats(self) -> dict[str, Any]:
