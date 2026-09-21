@@ -241,7 +241,8 @@ def to_openai_data(models: list[dict[str, Any]]) -> list[dict[str, Any]]:
             "display_name": m.get("name") or mid,
         }
         for k in ("credits", "desc", "supports_images", "supports_tool_call",
-                  "supports_reasoning", "is_default", "unlisted"):
+                  "supports_reasoning", "is_default", "unlisted",
+                  "only_reasoning", "reasoning", "context_window"):
             if m.get(k) is not None:
                 entry[k] = m[k]
         out.append(entry)

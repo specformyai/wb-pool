@@ -500,6 +500,56 @@ def extract_sms_code(sms: str, phone: str = "") -> str | None:
     return None
 
 
+def _norm_reasoning(raw: Any) -> dict[str, Any] | None:
+    """上游 reasoning 对象 -> snake_case。字段缺失就不出现在结果里。
+
+    实测两种形态（wb_v3config 里同时存在）：
+        {"effort": "medium", "summary": "auto"}
+        {"canDisableThinking": true, "defaultEffort": "high",
+         "supportedEfforts": ["low","medium","high","xhigh","max"],
+         "summary": "auto"}
+    """
+    if not isinstance(raw, dict):
+        return None
+    out: dict[str, Any] = {}
+    if raw.get("canDisableThinking") is not None:
+        out["can_disable_thinking"] = bool(raw.get("canDisableThinking"))
+    for src, dst in (("defaultEffort", "default_effort"),
+                     ("effort", "effort"),
+                     ("summary", "summary")):
+        v = raw.get(src)
+        if v:
+            out[dst] = str(v)
+    se = raw.get("supportedEfforts")
+    if isinstance(se, (list, tuple)) and se:
+        out["supported_efforts"] = [str(x) for x in se]
+    return out or None
+
+
+def _norm_context_window(raw: Any) -> dict[str, Any] | None:
+    """上游 contextWindow -> snake_case。没声明档位就返回 None。"""
+    if not isinstance(raw, dict):
+        return None
+    out: dict[str, Any] = {}
+    try:
+        d = int(raw.get("defaultLength"))
+        if d > 0:
+            out["default_length"] = d
+    except (TypeError, ValueError):
+        pass
+    lens: list[int] = []
+    for x in (raw.get("supportedLengths") or []):
+        try:
+            n = int(x)
+        except (TypeError, ValueError):
+            continue
+        if n > 0:
+            lens.append(n)
+    if lens:
+        out["supported_lengths"] = sorted(set(lens))
+    return out or None
+
+
 def fetch_official_models(token: str, proxy: str | None = None,
                           timeout: float = 30.0) -> dict[str, Any]:
     """
@@ -559,6 +609,16 @@ def fetch_official_models(token: str, proxy: str | None = None,
             "supports_tool_call": bool(m.get("supportsToolCall")),
             "supports_reasoning": bool(m.get("supportsReasoning")),
             "is_default": bool(m.get("isDefault")),
+            # 下面三项是思考能力元数据，原实现直接丢掉了：
+            #   only_reasoning  这个模型只能思考（关不掉）
+            #   reasoning       {can_disable_thinking, default_effort,
+            #                    supported_efforts, effort}
+            #   context_window  {default_length, supported_lengths}
+            # 客户端靠它们才知道能填哪些 effort / ctx 档位；
+            # 不透传的后果是只能看到一个 supports_reasoning 布尔。
+            "only_reasoning": bool(m.get("onlyReasoning")),
+            "reasoning": _norm_reasoning(m.get("reasoning")),
+            "context_window": _norm_context_window(m.get("contextWindow")),
         })
     if not out:
         return {"models": [], "error": "cli 模型全部 disabled"}

@@ -93,6 +93,26 @@ SPEC: dict[str, dict[str, Any]] = {
     # 上游是腾讯，业务日以东八区为准，所以默认 Asia/Shanghai；
     # 部署在别的时区的机器如果不设这个，会出现「签到重复跳过」或「今日到账整列为空」。
     "timezone": {"type": "str", "env": "WB_TZ", "default": "Asia/Shanghai"},
+
+    # ---- 思考透传 / 协议兼容 ----
+    # Anthropic 官方 thinking 块带 signature，多轮回传时客户端可能验签。
+    # 上游只给 OpenAI 口径的 reasoning_content 纯文本，拿不到真签名，
+    # 所以默认**关**：开了之后 Claude Code 这类严格客户端第二轮可能报错。
+    # 客户端不验签（或只看不回传）时手动开启即可看到思考。
+    "anthropic_thinking": {"type": "bool", "env": "WB_ANTHROPIC_THINKING",
+                           "default": False},
+    # 流式心跳间隔（秒）。0 = 关。只发 SSE 注释行，不伪造
+    # token / usage / 完成事件 —— 思考模型可能几分钟不出正文，
+    # 没心跳会被中间层（nginx/CF）当成死连接切掉。
+    "sse_keepalive_sec": {"type": "int", "env": "WB_SSE_KEEPALIVE_SEC",
+                          "default": 15, "min": 0, "max": 300},
+    # 上游静默忽略的参数（response_format / n / seed / logprobs 等）是否直接 400。
+    # 开（默认）：客户端立即知道要不到 JSON；关：兼容硬发这些参数的旧客户端。
+    "reject_unsupported_params": {"type": "bool", "env": "WB_REJECT_UNSUPPORTED",
+                                  "default": True},
+    # 按模型的 context_window 档位：{model_id: 档位}。
+    # 请求里显式带的 context_window 优先于这里。
+    "context_window_by_model": {"type": "modelmap", "env": None, "default": {}},
 }
 
 SECRET_KEYS = frozenset(k for k, v in SPEC.items() if v.get("secret"))
@@ -141,6 +161,37 @@ def _parse_exits(raw: Any) -> dict[int, str]:
     return out
 
 
+def _parse_modelmap(raw: Any) -> dict[str, int]:
+    """{model_id: 正整数}。非法项丢弃而不抛异常（同 _parse_exits 的理由）。
+
+    接受 dict 或 "id=300000,id2=1000000" 字符串。
+    """
+    out: dict[str, int] = {}
+
+    def put(mid: Any, val: Any) -> None:
+        m = str(mid or "").strip()
+        if not m:
+            return
+        try:
+            n = int(str(val).strip())
+        except (TypeError, ValueError):
+            return
+        if n > 0:
+            out[m] = n
+
+    if isinstance(raw, dict):
+        for k, v in raw.items():
+            put(k, v)
+    elif isinstance(raw, str):
+        for part in raw.replace("\n", ",").split(","):
+            part = part.strip()
+            if not part or "=" not in part:
+                continue
+            mid, _, val = part.partition("=")
+            put(mid, val)
+    return out
+
+
 def coerce(key: str, value: Any) -> Any:
     """按 schema 把外部输入转成内部类型，并做范围/枚举校验。
 
@@ -153,6 +204,9 @@ def coerce(key: str, value: Any) -> Any:
 
     if t == "exits":
         return _parse_exits(value)
+
+    if t == "modelmap":
+        return _parse_modelmap(value)
 
     if t == "bool":
         if isinstance(value, bool):
@@ -307,6 +361,8 @@ class Settings:
             # exits/secret 类型的默认值不适合直接回显，前端有专门控件
             if spec["type"] == "exits":
                 item["default"] = []
+            elif spec["type"] == "modelmap":
+                item["default"] = {}
             elif spec.get("secret"):
                 item["default"] = ""
             out.append(item)

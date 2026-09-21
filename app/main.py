@@ -47,6 +47,7 @@ from .upstream_sync import (STATIC_MODELS, static_models, merge_unlisted,
                             is_cache_expired, in_fail_cooldown,
                             load_models_cache as load_sync_cache, resolve_models,
                             sync_models_from_upstream, to_openai_data, vendor_of)
+from . import reasoning as rsn
 from .webauth import COOKIE_NAME, SESSION_TTL, WebAuth
 
 
@@ -375,6 +376,54 @@ def _sse(obj: Any) -> str:
     return f"data: {json.dumps(obj, ensure_ascii=False)}\n\n"
 
 
+def _model_meta(model_id: str) -> dict[str, Any]:
+    """取某个模型的元数据（思考档位 / 上下文档位 / 能力位）。
+
+    读的是同一份模型缓存，所以 /v1/models 对外声明的能力和这里用来
+    收敛请求的能力永远一致 —— 两处各读一份必然漂移。
+    """
+    try:
+        models, _src = resolve_models(MODELS_CACHE)
+    except Exception:  # noqa: BLE001 —— 元数据拿不到不该让请求失败
+        return {}
+    for m in models:
+        if m.get("id") == model_id:
+            return m
+    return {}
+
+
+async def _chunks_with_keepalive(first: Any, gen: Iterator[Any],
+                                 keepalive_s: float) -> AsyncIterator[Any]:
+    """逐块产出上游 chunk；空闲超过 keepalive_s 时产出 None 作为心跳信号。
+
+    为什么不能在同步生成器里做：同步生成器阻塞等上游时没有任何机会插入字节，
+    而思考模型单次能思考 8~14 分钟（k3 实测）。中间零字节会被反代/客户端
+    按空闲超时切断，客户端看到的是「连接断了」而不是「还在想」。
+
+    asyncio.shield 是关键：wait_for 超时会取消它等的那个对象，不 shield
+    就会把正在读上游的线程任务一起取消，流直接断掉 —— 心跳反而成了杀手。
+    心跳只发 SSE 注释行（": ..."），不伪造 chunk / usage / 完成事件，
+    客户端解析器一律忽略注释，不会污染内容或计费。
+    """
+    yield first
+    while True:
+        task = asyncio.create_task(asyncio.to_thread(_next_upstream_chunk, gen))
+        chunk: Any = None
+        while True:
+            try:
+                if keepalive_s and keepalive_s > 0:
+                    chunk = await asyncio.wait_for(asyncio.shield(task),
+                                                   timeout=keepalive_s)
+                else:
+                    chunk = await task
+                break
+            except asyncio.TimeoutError:
+                yield None
+            except _EmptyUpstreamStream:
+                return
+        yield chunk
+
+
 def _tries_headers(acc: Account | None, tried: list[str]) -> dict[str, str]:
     """重试过程对客户端可见：排障时一眼看出「是号坏了」还是「上游坏了」。
 
@@ -415,6 +464,34 @@ async def chat_completions(request: Request) -> Any:
     model = body.get("model") or "default"
     payload = {k: v for k, v in body.items() if k not in ("stream", "stream_options")}
     payload["model"] = model
+
+    # ---- 参数协商（实现与判据见 app/reasoning.py）----
+    # 上游对 response_format / n / seed 这类参数是**静默忽略**：实测发
+    # response_format=json_object 要 JSON，回来的是散文；n=2 只回一个 choice。
+    # 静默失真比报错坏得多 —— 客户端拿到的结果与它请求的语义无关却不知情。
+    meta = _model_meta(model)
+    if settings.get("reject_unsupported_params"):
+        try:
+            rsn.check_unsupported(body)
+        except rsn.ParamRejected as exc:
+            return JSONResponse(status_code=400, content={"error": {
+                "message": exc.message, "type": "invalid_request_error",
+                "param": exc.param, "code": "unsupported_parameter"}})
+    # thinking(Anthropic 写法) 与 reasoning_effort(OpenAI 写法) 都认，
+    # 再按该模型真支持的档位收敛（模型只有 [low,high] 时 medium 落到 low）。
+    eff = rsn.clamp_effort(
+        rsn.map_thinking(body.get("thinking"))
+        or rsn.normalize_effort(body.get("reasoning_effort")), meta)
+    cw = rsn.resolve_context_window(
+        body.get("context_window"), meta,
+        (settings.get("context_window_by_model") or {}).get(model))
+    # 已被本层消费的字段重新赋值，其余键保持原样透传（不改既有客户端行为）
+    for _k in ("thinking", "reasoning_effort", "context_window"):
+        payload.pop(_k, None)
+    if eff:
+        payload["reasoning_effort"] = eff
+    if cw:
+        payload["context_window"] = cw
 
     # 两个调试头只认管理路由（/api/chat/completions，require_admin 已过）。
     # /v1/* 是分发给使用者的反代口，若也认这两个头，任何拿反代 key 的人都能
@@ -513,10 +590,15 @@ async def chat_completions(request: Request) -> Any:
         created = int(time.time())
 
         if want_stream:
-            def event_stream() -> Iterator[str]:
+            keepalive_s = float(settings.get("sse_keepalive_sec") or 0)
+
+            async def event_stream() -> AsyncIterator[str]:
                 usage: dict[str, Any] | None = None
                 try:
-                    for chunk in _chain(first, gen):
+                    async for chunk in _chunks_with_keepalive(first, gen, keepalive_s):
+                        if chunk is None:
+                            yield ": wb-pool keepalive\n\n"
+                            continue
                         usage = chunk.get("usage") or usage
                         yield _sse(_norm_chunk(chunk, cid, created, model))
                     yield "data: [DONE]\n\n"
@@ -862,6 +944,28 @@ async def anthropic_messages(request: Request) -> Any:
     for key in ("temperature", "top_p", "max_tokens"):
         if key in body:
             payload[key] = body[key]
+
+    # ---- 参数协商：与 /v1/chat/completions 同一套判据，避免两条口行为分叉 ----
+    meta = _model_meta(model)
+    if settings.get("reject_unsupported_params"):
+        try:
+            rsn.check_unsupported(body)
+        except rsn.ParamRejected as exc:
+            return _anthropic_error_response(400, exc.message)
+    # Anthropic 的 thinking.budget_tokens 分档成上游的 reasoning_effort；
+    # output_config.effort 是部分客户端的写法，一并认。
+    eff = rsn.clamp_effort(
+        rsn.map_thinking(body.get("thinking"))
+        or rsn.normalize_effort((body.get("output_config") or {}).get("effort")
+                                if isinstance(body.get("output_config"), dict) else None),
+        meta)
+    if eff:
+        payload["reasoning_effort"] = eff
+    cw = rsn.resolve_context_window(
+        body.get("context_window"), meta,
+        (settings.get("context_window_by_model") or {}).get(model))
+    if cw:
+        payload["context_window"] = cw
     if "stop_sequences" in body:
         payload["stop"] = body.get("stop_sequences") or []
     choice = body.get("tool_choice")
@@ -922,10 +1026,22 @@ async def anthropic_messages(request: Request) -> Any:
             usage: dict[str, Any] | None = None
             finish = "stop"
             text_index: int | None = None
+            think_index: int | None = None
             next_index = 0
             tool_call_store: dict[int, dict[str, Any]] = {}
             released = False
             logged = False
+            # 思考透传默认关：Anthropic 的 thinking 块按官方约定带 signature，
+            # 供多轮回传时验签。上游只给 OpenAI 口径的 reasoning_content 纯文本，
+            # 拿不到真签名，伪造必然验签失败。默认关 = 对严格客户端安全；
+            # 需要看思考的场景由部署者显式打开（或直接用 /v1/chat/completions，
+            # 那条口的 reasoning_content 一直是完整的）。
+            # 客户端说了算：请求体 thinking 参数 / X-WB-Thinking 头；
+            # 都没表态时才用服务端默认（见 reasoning.wants_thinking）。
+            emit_think = rsn.wants_thinking(
+                body, bool(settings.get("anthropic_thinking")),
+                request.headers.get("X-WB-Thinking"))
+            keepalive_s = float(settings.get("sse_keepalive_sec") or 0)
             try:
                 yield _anthropic_event({
                     "type": "message_start",
@@ -935,13 +1051,41 @@ async def anthropic_messages(request: Request) -> Any:
                                 "usage": {"input_tokens": 0, "output_tokens": 0}},
                 })
 
-                chunk = first
-                while True:
+                async for chunk in _chunks_with_keepalive(first, gen, keepalive_s):
+                    if chunk is None:
+                        yield ": wb-pool keepalive\n\n"
+                        continue
                     usage = chunk.get("usage") or usage
                     for choice in chunk.get("choices") or []:
                         delta = choice.get("delta") or {}
+                        # 思考先于正文到达：thinking 块必须在 text 块之前
+                        # 开合，否则块索引顺序与 Anthropic 约定不符。
+                        rc = delta.get("reasoning_content") or ""
+                        if rc and emit_think:
+                            if think_index is None:
+                                think_index = next_index
+                                next_index += 1
+                                yield _anthropic_event({
+                                    "type": "content_block_start",
+                                    "index": think_index,
+                                    "content_block": {"type": "thinking",
+                                                      "thinking": ""},
+                                })
+                            yield _anthropic_event({
+                                "type": "content_block_delta",
+                                "index": think_index,
+                                "delta": {"type": "thinking_delta",
+                                          "thinking": rc},
+                            })
                         piece = delta.get("content") or ""
                         if piece:
+                            if think_index is not None:
+                                # 正文开始 = 思考结束，先关思考块
+                                yield _anthropic_event({
+                                    "type": "content_block_stop",
+                                    "index": think_index,
+                                })
+                                think_index = None
                             if text_index is None:
                                 text_index = next_index
                                 next_index += 1
@@ -958,11 +1102,12 @@ async def anthropic_messages(request: Request) -> Any:
                                                         delta["tool_calls"])
                         if choice.get("finish_reason"):
                             finish = choice["finish_reason"]
-                    try:
-                        chunk = await asyncio.to_thread(_next_upstream_chunk, gen)
-                    except _EmptyUpstreamStream:
-                        break
 
+                if think_index is not None:
+                    # 全程只有思考没有正文（思考模型被 max_tokens 截断时会这样）
+                    yield _anthropic_event({
+                        "type": "content_block_stop", "index": think_index,
+                    })
                 if text_index is not None:
                     yield _anthropic_event({
                         "type": "content_block_stop", "index": text_index,
@@ -1039,7 +1184,7 @@ async def anthropic_messages(request: Request) -> Any:
                                           **_tries_headers(acc, [acc.masked()])})
 
     try:
-        text, _reasoning, usage, finish, tool_calls = await asyncio.to_thread(
+        text, reasoning, usage, finish, tool_calls = await asyncio.to_thread(
             _collect_chat, first, gen)
     except Exception as exc:  # noqa: BLE001
         err = str(exc)[:200]
@@ -1049,6 +1194,11 @@ async def anthropic_messages(request: Request) -> Any:
         return _anthropic_error_response(502, f"上游流中断: {err}")
 
     content_blocks: list[dict[str, Any]] = []
+    # thinking 块在 text 之前（与流式的块顺序保持一致）
+    if reasoning and rsn.wants_thinking(
+            body, bool(settings.get("anthropic_thinking")),
+            request.headers.get("X-WB-Thinking")):
+        content_blocks.append({"type": "thinking", "thinking": reasoning})
     if text or not tool_calls:
         content_blocks.append({"type": "text", "text": text})
     for call in tool_calls:
