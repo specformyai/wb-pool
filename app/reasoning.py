@@ -60,12 +60,14 @@ _BUDGET_TIERS: tuple[tuple[int, str], ...] = (
 )
 
 # 会静默改变语义的参数：上游不认，装作支持等于骗客户端
+# 不列 metadata / service_tier：它们是 Anthropic 官方参数，Claude Code 每个请求
+# 都带 metadata.user_id，且二者只是元信息、不改变回复语义，拒了只会把客户端挡在门外
+# （2026-09-21 生产实测：带 metadata 的请求被 400）。
 UNSUPPORTED_PARAMS: frozenset[str] = frozenset({
     "response_format", "n", "seed", "logprobs", "top_logprobs",
     "presence_penalty", "frequency_penalty", "logit_bias",
-    "functions", "function_call", "store", "metadata",
+    "functions", "function_call", "store",
     "modalities", "audio", "prediction", "web_search_options",
-    "service_tier",
 })
 
 # 上游 chat 请求允许出现的顶层键（白名单之外的自定义键不往上游发）

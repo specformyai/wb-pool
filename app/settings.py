@@ -95,12 +95,12 @@ SPEC: dict[str, dict[str, Any]] = {
     "timezone": {"type": "str", "env": "WB_TZ", "default": "Asia/Shanghai"},
 
     # ---- 思考透传 / 协议兼容 ----
-    # Anthropic 官方 thinking 块带 signature，多轮回传时客户端可能验签。
-    # 上游只给 OpenAI 口径的 reasoning_content 纯文本，拿不到真签名，
-    # 所以默认**关**：开了之后 Claude Code 这类严格客户端第二轮可能报错。
-    # 客户端不验签（或只看不回传）时手动开启即可看到思考。
+    # 默认**开**：Anthropic 口回传 thinking 块（无 signature）。
+    # 多轮回传时 _anthropic_messages_to_openai 只取 text 块，thinking 块不会送到上游，
+    # 2026-09-21 用 dsh 实测多轮回传无报错。客户端仍可用请求体 thinking 或
+    # X-WB-Thinking 头按请求关掉；会严格验签的客户端可把这里改回 false。
     "anthropic_thinking": {"type": "bool", "env": "WB_ANTHROPIC_THINKING",
-                           "default": False},
+                           "default": True},
     # 流式心跳间隔（秒）。0 = 关。只发 SSE 注释行，不伪造
     # token / usage / 完成事件 —— 思考模型可能几分钟不出正文，
     # 没心跳会被中间层（nginx/CF）当成死连接切掉。
