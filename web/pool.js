@@ -467,7 +467,6 @@ async function withBusy(btn, fn) {
 
 // ---------- 单账号操作（与 opsHtml 约定的 data-act / data-phone 属性对接） ----------
 async function handleRowAction(act, phone, btn) {
-  const acc = state.accounts.find(a => a.phone === phone);
   if (btn) btn.disabled = true;
   try {
     if (act === 'checkin') { // 单个签到
@@ -476,9 +475,15 @@ async function handleRowAction(act, phone, btn) {
     } else if (act === 'token') { // 刷新 Token
       await apiFetch('/api/pool/refresh_token', { method: 'POST', body: { phone } });
       toast(`${phone} Token 已刷新`);
-    } else if (act === 'toggle') { // 启用 / 禁用
-      const next = acc && acc.statusKey === 'active' ? 'disabled' : 'active';
-      await apiFetch('/api/pool/status', { method: 'POST', body: { phone, status: next } });
+    } else if (act === 'disable' || act === 'enable') { // 禁用 / 启用
+      // opsHtml 渲染的动作名就是 disable / enable（2026-08-24 起）。这里原来只认
+      // 'toggle'，点击落进空分支：不发请求、不报错、只静默刷新列表 —— 行内
+      // 禁用/启用按钮因此整整失效了近一个月，批量操作走 BATCH_DEFS 不受影响。
+      // 目标状态由按钮动作决定，不从 statusKey 反推：depleted / dead 行显示的
+      // 也是「禁用」，按「非 active 即启用」反推会把它们误发成 active。
+      const next = act === 'disable' ? 'disabled' : 'active';
+      const r = await apiFetch('/api/pool/status', { method: 'POST', body: { phone, status: next } });
+      if (r && r.ok === false) throw new Error(`${phone} 不在账号池中`);
       toast(`${phone} 已${next === 'active' ? '启用' : '禁用'}`);
     } else if (act === 'remove') { // 移除：危险操作，先二次确认
       const okDel = await openConfirm({
