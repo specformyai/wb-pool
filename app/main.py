@@ -424,14 +424,18 @@ async def _chunks_with_keepalive(first: Any, gen: Iterator[Any],
         yield chunk
 
 
-def _tries_headers(acc: Account | None, tried: list[str]) -> dict[str, str]:
+def _tries_headers(acc: Account | None, tried: list[str],
+                   dropped: list[str] | None = None) -> dict[str, str]:
     """重试过程对客户端可见：排障时一眼看出「是号坏了」还是「上游坏了」。
 
-    X-WB-Tries     = 本次请求一共取过几个号（含最终成功的那个）
-    X-WB-Swapped   = 中途换掉的号（masked，逗号分隔），没换过就不给
-    X-WB-Account   = 最终服务的号；全部失败时没有
+    X-WB-Tries          = 本次请求一共取过几个号（含最终成功的那个）
+    X-WB-Swapped        = 中途换掉的号（masked，逗号分隔），没换过就不给
+    X-WB-Account        = 最终服务的号；全部失败时没有
+    X-WB-Dropped-Params = 被本层丢弃、上游不认的参数（逗号分隔），没丢就不给
     """
     h: dict[str, str] = {"X-WB-Tries": str(max(1, len(tried)))}
+    if dropped:
+        h["X-WB-Dropped-Params"] = ",".join(dropped)
     if acc is not None:
         h["X-WB-Account"] = acc.masked()
         swapped = [m for m in tried if m != acc.masked()]
@@ -486,7 +490,9 @@ async def chat_completions(request: Request) -> Any:
     # ---- 参数协商（实现与判据见 app/reasoning.py）----
     # 上游对 response_format / n / seed 这类参数是**静默忽略**：实测发
     # response_format=json_object 要 JSON，回来的是散文；n=2 只回一个 choice。
-    # 静默失真比报错坏得多 —— 客户端拿到的结果与它请求的语义无关却不知情。
+    # 默认直接丢弃并在 X-WB-Dropped-Params 头里告知（各家 SDK 默认就会塞
+    # store / n=1 之类的参数，逐个 400 会把正常客户端全挡在门外）；
+    # 面板开 reject_unsupported_params 才改成 400。
     meta = _model_meta(model)
     if settings.get("reject_unsupported_params"):
         try:
@@ -495,6 +501,7 @@ async def chat_completions(request: Request) -> Any:
             return JSONResponse(status_code=400, content={"error": {
                 "message": exc.message, "type": "invalid_request_error",
                 "param": exc.param, "code": "unsupported_parameter"}})
+    dropped = rsn.drop_unsupported(payload)
     # thinking(Anthropic 写法) 与 reasoning_effort(OpenAI 写法) 都认，
     # 再按该模型真支持的档位收敛（模型只有 [low,high] 时 medium 落到 low）。
     eff = rsn.clamp_effort(
@@ -641,7 +648,7 @@ async def chat_completions(request: Request) -> Any:
             return StreamingResponse(event_stream(), media_type="text/event-stream",
                                      headers={"Cache-Control": "no-cache",
                                               "X-Accel-Buffering": "no",
-                                              **_tries_headers(acc, tried)})
+                                              **_tries_headers(acc, tried, dropped)})
 
         # 非流式：聚合上游流
         content, reasoning, usage, finish, tool_calls = "", "", None, "stop", []
@@ -671,10 +678,10 @@ async def chat_completions(request: Request) -> Any:
             "id": cid, "object": "chat.completion", "created": created, "model": model,
             "choices": [{"index": 0, "message": msg, "finish_reason": finish or "stop"}],
             "usage": usage or {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
-        }, headers=_tries_headers(acc, tried))
+        }, headers=_tries_headers(acc, tried, dropped))
 
     raise HTTPException(502, f"全部账号均失败，最后错误: {last_err}",
-                        headers=_tries_headers(None, tried))
+                        headers=_tries_headers(None, tried, dropped))
 
 
 def _chain(first: Any, gen: Iterator[Any]) -> Iterator[Any]:
@@ -973,6 +980,8 @@ async def anthropic_messages(request: Request) -> Any:
             rsn.check_unsupported(body)
         except rsn.ParamRejected as exc:
             return _anthropic_error_response(400, exc.message)
+    # payload 是白名单重建的，这些键本来就到不了上游；只为响应头记一下丢了什么
+    dropped = rsn.drop_unsupported(dict(body))
     # Anthropic 的 thinking.budget_tokens 分档成上游的 reasoning_effort；
     # output_config.effort 是部分客户端的写法，一并认。
     eff = rsn.clamp_effort(
@@ -1200,7 +1209,7 @@ async def anthropic_messages(request: Request) -> Any:
         return StreamingResponse(a_stream(), media_type="text/event-stream",
                                  headers={"Cache-Control": "no-cache",
                                           "X-Accel-Buffering": "no",
-                                          **_tries_headers(acc, [acc.masked()])})
+                                          **_tries_headers(acc, [acc.masked()], dropped)})
 
     try:
         text, reasoning, usage, finish, tool_calls = await asyncio.to_thread(
@@ -1240,13 +1249,13 @@ async def anthropic_messages(request: Request) -> Any:
               account=acc.masked(), t_first=t_first,
               in_tokens=(usage or {}).get("prompt_tokens", 0),
               out_tokens=(usage or {}).get("completion_tokens", 0), code=200)
-    return {
+    return JSONResponse({
         "id": mid, "type": "message", "role": "assistant", "model": model,
         "content": content_blocks,
         "stop_reason": _anthropic_stop_reason(finish, bool(tool_calls)),
         "stop_sequence": None,
         "usage": _anthropic_usage(usage),
-    }
+    }, headers=_tries_headers(acc, [acc.masked()], dropped))
 
 
 # --------------------------------------------------------------------------- #

@@ -129,17 +129,18 @@ Anthropic 口默认**发** `thinking` 块，要不要发由客户端说了算：
 ### 参数协商
 
 上游会**静默忽略**一批 OpenAI 参数：要 `response_format: json_object`，回来的是散文；`n=2`
-只回一个 choice。默认对这些参数直接回 `400`，让客户端立刻知道这个语义要不到，而不是拿着一个
-不符合预期的结果却不知道为什么。
+只回一个 choice。默认把这些参数**丢弃后照常转发**，并在响应头 `X-WB-Dropped-Params` 里列出丢了
+哪些（逗号分隔），排障时能看见、又不打断正常对话 —— 各家 SDK 默认就会塞 `store`、`n=1` 之类
+的参数，逐个 400 会把正常客户端全挡在门外。
 
-拒绝名单：`response_format`、`n`、`seed`、`logprobs`、`top_logprobs`、`presence_penalty`、
-`frequency_penalty`、`logit_bias`、`functions`、`function_call`、`store`、
+丢弃名单：`response_format`、`n`、`seed`、`logprobs`、`top_logprobs`、`presence_penalty`、
+`frequency_penalty`、`logit_bias`、`functions`、`function_call`、
 `modalities`、`audio`、`prediction`、`web_search_options`
 
-`metadata` 与 `service_tier` 不在名单里：它们是 Anthropic 官方参数（Claude Code 每个请求都带
-`metadata.user_id`），只是元信息、不改变回复语义，会被静默丢弃而不是拒绝。
+`metadata`、`service_tier`、`store` 不在名单里：前两个是 Anthropic 官方参数（Claude Code 每个
+请求都带 `metadata.user_id`），`store` 是 OpenAI 的服务端留存开关，都只是元信息、不改变回复语义。
 
-硬发这些参数的旧客户端可以在面板关掉 `reject_unsupported_params`，关掉后它们会被丢弃、请求照常发出。
+想让客户端当场知道语义要不到的，可以在面板打开 `reject_unsupported_params`，开了以后名单��的参数直接回 `400`。
 
 ### SSE 心跳
 
@@ -223,7 +224,7 @@ python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
 | 改签到时间 / 余额刷新间隔 | 「设置 → 运行时配置」 |
 | Anthropic 思考块的默认开关 | 「设置 → 运行时配置」`anthropic_thinking` |
 | SSE 心跳间隔 | `sse_keepalive_sec`（秒，0 = 关） |
-| 关掉「不支持参数直接 400」 | `reject_unsupported_params` |
+| 打开「不支持参数直接 400」（默认丢弃） | `reject_unsupported_params` |
 | 按模型钉死上下文档位 | `context_window_by_model` |
 
 配置优先级是 **面板设置 > 环境变量 > 代码默认值**，面板改的值存在 `data/settings.json`。

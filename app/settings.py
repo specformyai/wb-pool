@@ -107,9 +107,10 @@ SPEC: dict[str, dict[str, Any]] = {
     "sse_keepalive_sec": {"type": "int", "env": "WB_SSE_KEEPALIVE_SEC",
                           "default": 15, "min": 0, "max": 300},
     # 上游静默忽略的参数（response_format / n / seed / logprobs 等）是否直接 400。
-    # 开（默认）：客户端立即知道要不到 JSON；关：兼容硬发这些参数的旧客户端。
+    # 关（默认，2026-09-21 用户决定）：丢弃后照常请求，响应头 X-WB-Dropped-Params 告知；
+    # 开：逐个 400（各家 SDK 默认就带 store / n=1，开了会把正常客户端全挡住）。
     "reject_unsupported_params": {"type": "bool", "env": "WB_REJECT_UNSUPPORTED",
-                                  "default": True},
+                                  "default": False},
     # 按模型的 context_window 档位：{model_id: 档位}。
     # 请求里显式带的 context_window 优先于这里。
     "context_window_by_model": {"type": "modelmap", "env": None, "default": {}},

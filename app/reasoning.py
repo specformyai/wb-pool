@@ -63,10 +63,13 @@ _BUDGET_TIERS: tuple[tuple[int, str], ...] = (
 # 不列 metadata / service_tier：它们是 Anthropic 官方参数，Claude Code 每个请求
 # 都带 metadata.user_id，且二者只是元信息、不改变回复语义，拒了只会把客户端挡在门外
 # （2026-09-21 生产实测：带 metadata 的请求被 400）。
+# 也不列 store：它只是 OpenAI 的「是否在服务端留存本次对话」开关，不影响回复内容；
+# pi-ai 的 openai-completions 适配器（dsh 在用）默认每个请求都带 store=false，
+# 拒了会把 dsh 整条 OpenAI 口打死（2026-09-21 生产实测 400）。
 UNSUPPORTED_PARAMS: frozenset[str] = frozenset({
     "response_format", "n", "seed", "logprobs", "top_logprobs",
     "presence_penalty", "frequency_penalty", "logit_bias",
-    "functions", "function_call", "store",
+    "functions", "function_call",
     "modalities", "audio", "prediction", "web_search_options",
 })
 
@@ -214,6 +217,19 @@ def check_unsupported(body: dict[str, Any]) -> None:
                 f"参数 {key} 不被上游支持：上游会静默忽略它，"
                 f"返回的结果与该参数无关。已拒绝以免结果失真。",
             )
+
+
+def drop_unsupported(payload: dict[str, Any]) -> list[str]:
+    """从待发上游的请求体里剥掉静默失真的参数，返回剥掉的键名（按名单顺序稳定）。
+
+    默认策略（2026-09-21 用户决定）：不 400、直接丢。上游本来就会忽略它们，
+    在我们这一层剥掉只是让请求体干净，并通过 X-WB-Dropped-Params 头告诉客户端
+    「你要的这个语义没生效」——排障时能看见，又不打断正常对话。
+    """
+    dropped = [k for k in sorted(UNSUPPORTED_PARAMS) if k in payload]
+    for k in dropped:
+        payload.pop(k, None)
+    return dropped
 
 
 def resolve_context_window(requested: Any, meta: dict[str, Any] | None,

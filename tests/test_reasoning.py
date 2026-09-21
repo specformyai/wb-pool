@@ -110,6 +110,16 @@ try:
 except Exception as e:
     FAILS.append(f"\u6b63\u5e38\u53c2\u6570\u8bef\u62d2: {e}")
 
+# ---------------- drop_unsupported（默认策略：丢弃而非 400） ----------------
+_body = {"model": "hy3", "messages": [], "store": False, "n": 1, "seed": 7,
+         "response_format": {"type": "json_object"}, "temperature": 0.3, "metadata": {"user_id": "u"}}
+_dropped = R.drop_unsupported(_body)
+eq(_dropped, ["n", "response_format", "seed"], "\u4e22\u6389\u7684\u952e\u6309\u540d\u5355\u6392\u5e8f\u8fd4\u56de")
+eq(sorted(_body), ["messages", "metadata", "model", "store", "temperature"],
+   "\u540d\u5355\u5185\u7684\u952e\u88ab\u5265\u6389\uff0cstore/metadata/\u6b63\u5e38\u53c2\u6570\u4fdd\u7559")
+eq(R.drop_unsupported({"model": "hy3", "messages": []}), [], "\u6ca1\u6709\u53ef\u4e22\u7684\u952e -> \u7a7a\u5217\u8868")
+eq("store" in R.UNSUPPORTED_PARAMS, False, "store \u4e0d\u5728\u540d\u5355\uff08pi-ai \u9ed8\u8ba4\u5e26 store=false\uff09")
+
 # ---------------- resolve_context_window ----------------
 META_CW = {"context_window": {"defaultLength": 300000,
                               "supportedLengths": [300000, 1000000]}}
